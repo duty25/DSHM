@@ -96,42 +96,44 @@ patchFile(
   'apiproxy Android opener 中文提示',
 );
 
-// Patch 5: session-persistence-jsonl 用 link() 发布会话日志（.jsonl.zstd）。
-// Android SELinux 拒绝 app 对 app_data_file 执行 link 操作 → EACCES，
-// 会话无法保存导致"本轮运行失败"。改为同一目录内原子 rename
-// （app_data_file 允许 rename，语义等价且同样持久）。
+// Patch 5+6: session-persistence-jsonl / attachment-local 的硬链接适配（版本无关写法）
+// 背景：Android 的 app 数据目录不支持硬链接（link() 会 EPERM/EXDEV），原补丁把 link 改写为 rename。
+// 但 rename 会移除源文件，导致紧随其后的 unlink(源) 抛 ENOENT；且新版 DSH 自行导入了 rename，
+// 一旦原 import 改写模式命中就会造成重复导入（SyntaxError）。
+// 现改为在导入处注入 link 垫片：用 copyFile(COPYFILE_EXCL) 实现，保留 link 的两个关键语义
+// （目标已存在则抛 EEXIST、源文件保留），并且不依赖任何调用点写法 → 新旧版本都能命中。
+const LINK_SHIM = `import { constants as __slFsConstants } from "node:fs";
+const link = async (__slSrc, __slDest) => {
+	await copyFile(__slSrc, __slDest, __slFsConstants.COPYFILE_EXCL);
+};`;
+
+function patchLinkToCopyShim(src) {
+  if (!/\blink\(/.test(src)) return src;
+  const m = src.match(/import \{([^}]*)\} from "node:fs\/promises";/);
+  if (!m) return src;
+  const names = m[1].split(",").map((s) => s.trim()).filter(Boolean).filter((n) => n !== "link");
+  if (!names.includes("copyFile")) names.push("copyFile");
+  return src.replace(
+    m[0],
+    `import { ${names.join(", ")} } from "node:fs/promises";\n${LINK_SHIM}`,
+  );
+}
+
 patchFile(
   'lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js',
-  (src) =>
-    src
-      .replace(
-        /import \{ link, mkdir,/,
-        'import { rename, mkdir,',
-      )
-      .replace(
-        /await link\(tmp, finalPath\);/,
-        'await rename(tmp, finalPath);',
-      ),
-  'session-persistence link→rename',
+  patchLinkToCopyShim,
+  'session-persistence-jsonl link→copyFile(EXCL) 垫片',
+);
+
+patchFile(
+  'lib/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js',
+  patchLinkToCopyShim,
+  'attachment-local link→copyFile(EXCL) 垫片',
 );
 
 // Patch 6: attachment-local 存储附件时同样用 link() 发布对象文件，Android
 // SELinux 拒绝 app 对 app_data_file 执行 link → EACCES。改为 rename
 // （content-addressed 附件同 sha256 内容相同，覆盖无害）。
-patchFile(
-  'lib/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js',
-  (src) =>
-    src
-      .replace(
-        /import \{ chmod, link, mkdir,/,
-        'import { chmod, rename, mkdir,',
-      )
-      .replace(
-        /await link\(temporary, target\);/,
-        'await rename(temporary, target);',
-      ),
-  'attachment-local link→rename',
-);
 
 // Patch 7: bash-local 用 DSH_BASH_PATH 直接执行 nativeLibraryDir/libbash.so。
 // Android SELinux 禁止从 app 数据目录（filesDir）执行二进制，filesDir/bin

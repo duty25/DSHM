@@ -7,7 +7,7 @@ WORK="${WORK:-/tmp/sl-runtime}"
 OUT="${OUT:-$SCRIPT_DIR/out}"
 ARCH="${ARCH:-aarch64}"
 TERMUX_APP_VER="${TERMUX_APP_VER:-v0.118.3}"
-DSH_VERSION="${DSH_VERSION:-0.1.0-rc.6}"
+DSH_VERSION="${DSH_VERSION:-0.1.5-rc.1}"
 NODE_VER="${NODE_VER:-v22.19.0}"
 BUILD_PTY="${BUILD_PTY:-1}"
 # 镜像源（CI 可覆盖为大学镜像加速）
