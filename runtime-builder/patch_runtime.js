@@ -326,8 +326,11 @@ const KOFFI_STUB_ESM = `function __siliconleapKoffiStub() {
       return __siliconleapKoffiStub();
     },
     apply: (_t, _thisArg, args) => {
-      if (args[0] === "STARTUPINFOW") return { size: 104 };
-      if (args[0] === "PROCESS_INFORMATION") return { size: 24 };
+      const __slName = String(args[0] == null ? "" : args[0]);
+      const __slDef = args[1] && typeof args[1] === "object" ? args[1] : {};
+      const __slHas = (...__slF) => __slF.every((__slN) => Object.prototype.hasOwnProperty.call(__slDef, __slN));
+      if (__slName.includes("STARTUPINFOW") || __slHas("hStdInput", "hStdOutput", "hStdError")) return { size: 104 };
+      if (__slName.includes("PROCESS_INFORMATION") || __slHas("hProcess", "dwProcessId")) return { size: 24 };
       return null;
     },
     construct: () => ({}),
@@ -343,8 +346,11 @@ const KOFFI_STUB_CJS = `function __siliconleapKoffiStub() {
       return __siliconleapKoffiStub();
     },
     apply: (_t, _thisArg, args) => {
-      if (args[0] === "STARTUPINFOW") return { size: 104 };
-      if (args[0] === "PROCESS_INFORMATION") return { size: 24 };
+      const __slName = String(args[0] == null ? "" : args[0]);
+      const __slDef = args[1] && typeof args[1] === "object" ? args[1] : {};
+      const __slHas = (...__slF) => __slF.every((__slN) => Object.prototype.hasOwnProperty.call(__slDef, __slN));
+      if (__slName.includes("STARTUPINFOW") || __slHas("hStdInput", "hStdOutput", "hStdError")) return { size: 104 };
+      if (__slName.includes("PROCESS_INFORMATION") || __slHas("hProcess", "dwProcessId")) return { size: 24 };
       return null;
     },
     construct: () => ({}),
