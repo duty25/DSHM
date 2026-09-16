@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: "@deepseek-ai/dsh 版本（默认 0.1.5-rc.2；想稳可试 0.1.2-rc.1，想最新填 0.1.6-alpha.1）"
+        required: false
+        default: "0.1.5-rc.2"
 
 concurrency:
   group: build-apk-${{ github.ref_name }}
@@ -82,6 +87,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # 手动触发时用输入框里的版本；打 tag 时回落到默认
+      DSH_VERSION: ${{ github.event.inputs.dsh_version || '0.1.5-rc.2' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,9 +131,21 @@ jobs:
           NPM_REGISTRY: https://registry.npmmirror.com
           NODE_MIRROR: https://mirrors.ustc.edu.cn/node
         run: |
+          set -o pipefail
+          echo "装配 dsh 版本 = $DSH_VERSION"
           chmod +x runtime-builder/build_runtime.sh runtime-builder/build_node_pty.sh runtime-builder/launcher/run-dsh.sh
-          WORK="$RUNNER_TEMP/sl-runtime" OUT="$GITHUB_WORKSPACE/runtime-out" ./runtime-builder/build_runtime.sh
+          WORK="$RUNNER_TEMP/sl-runtime" OUT="$GITHUB_WORKSPACE/runtime-out" ./runtime-builder/build_runtime.sh 2>&1 | tee /tmp/rt.log
           ls -lh runtime-out/
+          # 补丁没匹配上 = 这个 dsh 版本的代码变了，Android 兼容补丁没打上。
+          # 默认那版只打印 [warn] 就过去了 —— 那样会编出一个“能装但会以奇怪方式坏”的包，
+          # 所以这里把警告升级成硬失败。
+          if grep -qE "\[warn\].*(未匹配|不存在|未匹配到文件|写入失败)" /tmp/rt.log; then
+            echo "::error::有运行时补丁没打上（多半是 dsh 版本变了）。下面是要点："
+            grep -E "\[warn\]" /tmp/rt.log || true
+            echo "::error::换一个更接近 0.1.0-rc.6 的版本再试（比如 0.1.2-rc.1）"
+            exit 1
+          fi
+          echo "补丁全部匹配 ✓"
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -187,9 +207,17 @@ jobs:
             echo "::warning::未配置 ANDROID_* 签名 Secrets，将回退使用 debug 签名"
           fi
 
+      # 固定签名密钥：不缓存的话，GitHub 每次跑都是全新的 debug keystore，
+      # 签出来的 APK 签名不一致 -> 装不上去（只能卸载重装，运行时/会话全丢）。
+      # 缓存住之后，以后每次构建都能覆盖安装。
+      - name: 固定签名密钥（缓存 debug.keystore）
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: dshm-debug-keystore-v1
       - name: Build APK
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon --no-configuration-cache
+        run: ./gradlew assembleRelease --no-daemon --no-configuration-cache -PruntimeVersion="${DSH_VERSION}"
 
       - name: Verify APK native libs
         run: |
