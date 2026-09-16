@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dsh_version:
-        description: "@deepseek-ai/dsh 版本（默认 0.1.5-rc.2；想稳可试 0.1.2-rc.1，想最新填 0.1.6-alpha.1）"
+        description: "@deepseek-ai/dsh 版本（默认 0.1.5-rc.2，已适配；想回到原版行为填 0.1.0-rc.6）"
         required: false
         default: "0.1.5-rc.2"
 
@@ -125,6 +125,140 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zip unzip dpkg dpkg-dev
 
+      # ── 给新版 dsh 补上原补丁没覆盖的地方 ─────────────────────────────────────
+      #   runtime-builder/patch_runtime.js 是按 dsh 0.1.0-rc.6 写的；0.1.1 起有 4 处对不上
+      #   （tool-fs-search 的 rg 路径、apiproxy 包被删、session-persistence 的 import、
+      #     attachment-local 的 import 被改坏）。这里把针对新形态的补丁【追加】到该文件末尾：
+      #   老版本匹配不到只会 [warn] 跳过，无害；有没有生效由下一步做正向校验。
+      - name: 适配新版 dsh 的运行时补丁
+        run: |
+          cat >> runtime-builder/patch_runtime.js <<'JSEOF'
+
+          // ═══════════════════════════════════════════════════════════════════════════
+          // 追加补丁：适配 dsh >= 0.1.1（上面的补丁是按 0.1.0-rc.6 写的）
+          // 老版本匹配不到时只会打印 [warn] 跳过，不影响结果 —— 是否"该打的全打上了"，
+          // 由后面的「校验 Android 补丁」步骤做【正向检查】（查文件里的补丁标志 + 语法）。
+          // ═══════════════════════════════════════════════════════════════════════════
+          const __dshPkg = path.join(prefix, 'lib/node_modules/@deepseek-ai/dsh/package.json');
+          const __dshVer = fs.existsSync(__dshPkg)
+            ? JSON.parse(fs.readFileSync(__dshPkg, 'utf8')).version || 'unknown'
+            : 'unknown';
+          console.log(`[info] 目标 dsh 版本: ${__dshVer}`);
+
+          // Patch 15: dsh >= 0.1.1 的 tool-fs-search 把 ripgrep 路径解析改成了
+          //   「先找 ${execPath}-rg 旁挂文件 → 再回退 @vscode/ripgrep」
+          // 没有给 DSH_RG_PATH 留任何口子。Android 上 libnode.so 旁边不存在 -rg 旁挂文件、
+          // @vscode/ripgrep 也没有 aarch64-android 平台包 → 文件搜索一调用就失败。
+          // 在解析函数最前面插入 DSH_RG_PATH 优先分支（两种代码形态都兼容；已打过则跳过）。
+          patchFile(
+            'lib/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js',
+            (src) => {
+              if (src.includes('process.env.DSH_RG_PATH')) return src;
+              const anchored = src.replace(
+                /(rgPathPromise \?\?= Promise\.resolve\(\)\.then\(async \(\) => \{\n)/,
+                '$1\t\tif (process.env.DSH_RG_PATH) return process.env.DSH_RG_PATH;\n',
+              );
+              if (anchored !== src) return anchored;
+              return src.replace(
+                /return \(await import\("@vscode\/ripgrep"\)\)\.rgPath;/,
+                'if (process.env.DSH_RG_PATH) return process.env.DSH_RG_PATH;\n\t\treturn (await import("@vscode/ripgrep")).rgPath;',
+              );
+            },
+            'tool-fs-search DSH_RG_PATH（新版 resolveRgPath）',
+          );
+
+          // Patch 16: dsh >= 0.1.2 删掉了 dsh-host-apiproxy，"打开配置文件"的实现搬到了
+          // dsh-native-command（报错原文一字未变）。Android 上同样没有 native path opener，
+          // 这里给出中文提示并带上路径（原补丁 4 只对老版本有效，匹配不到就跳过）。
+          patchFile(
+            'lib/node_modules/@deepseek-ai/dsh-native-command/lib/index.js',
+            (src) => {
+              if (src.includes('Android 沙箱限制')) return src;
+              return src.replace(
+                /throw new Error\(`native path opener is unsupported on \$\{platform\}`\);/,
+                `if (platform === "android") {
+                throw new Error("Android 沙箱限制，无法调用系统应用打开该文件；路径：" + path + "。请在 DSHM 应用内或使用 adb 查看。");
+              }
+              throw new Error(\`native path opener is unsupported on \${platform}\`);`,
+              );
+            },
+            'native-command Android opener 中文提示',
+          );
+
+          // Patch 17: attachment-local —— 两件事一起修：
+          //   a) dsh >= 0.1.1 的 node:fs/promises import 里本来就有 rename，补丁 6 的
+          //      `import { chmod, link, mkdir,` 替换会造出「重复导入 rename」→ ESM 语法错误
+          //      （Identifier 'rename' has already been declared），整个模块加载失败。
+          //      这里把 import 规范化（去重 + 保证有 copyFile）。
+          //   b) 该文件用 link() 发布内容寻址对象，Android SELinux 对 app_data_file 禁 link()
+          //      → EACCES。补丁 6 想改成 rename()，但那会「吃掉」源文件：之后紧跟的
+          //      unlink(staged.path)/unlink(temporary) 会 ENOENT，附件写入直接失败
+          //      （0.1.0-rc.6 上就已是这个问题）。改成排他复制 copyFile(..., 1)：
+          //      源文件保留、目标已存在仍返回 EEXIST（保持原代码的竞态分支语义）。
+          patchFile(
+            'lib/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js',
+            (src) => {
+              const replaced = src.replace(
+                /await (?:link|rename)\(([^)]*), target\);/g,
+                (_m, args) => `await copyFile(${args}, target, 1);`,
+              );
+              if (replaced === src) return src;
+              return replaced.replace(/import \{([^}]*)\} from "node:fs\/promises";/, (_m, names) => {
+                const uniq = [...new Set(names.split(',').map((s) => s.trim()).filter(Boolean))];
+                if (!uniq.includes('copyFile')) uniq.push('copyFile');
+                return `import { ${uniq.join(', ')} } from "node:fs/promises";`;
+              });
+            },
+            'attachment-local 修 import 重复 + link()→排他复制',
+          );
+
+          // Patch 18: dsh-session-persistence-jsonl —— 0.1.1 起 import 里多了一个 lstat，
+          // 补丁 5 的 `import { link, mkdir,` 匹配不到 → 调用点被改成了 rename() 但 rename
+          // 没有导入 → 保存会话时 ReferenceError: rename is not defined。
+          // 这里把 rename 补进 import（调用点没改成 rename 的版本直接跳过）。
+          patchFile(
+            'lib/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js',
+            (src) => {
+              if (!src.includes('await rename(tmp, finalPath);')) return src;
+              return src.replace(/import \{([^}]*)\} from "node:fs\/promises";/, (m, names) => {
+                const uniq = [...new Set(names.split(',').map((s) => s.trim()).filter(Boolean))];
+                if (uniq.includes('rename')) return m;
+                uniq.unshift('rename');
+                return `import { ${uniq.join(', ')} } from "node:fs/promises";`;
+              });
+            },
+            'session-persistence 补 rename 导入',
+          );
+
+          // Patch 19: koffi stub 加强 —— 0.1.1 起 struct 名字加了前缀（DSH_STARTUPINFOW /
+          // DSH_PROCESS_INFORMATION），老 stub 只认不带前缀的名字，其它调用返回 null，
+          // 而 dsh-win32-process 会立刻读 `.size` 做 ABI 断言 → TypeError: Cannot read
+          // properties of null (reading 'size')，dsh-sandbox-local / dsh-subprocess-local
+          // 整个模块加载失败。这里改成"名字无关"的 stub：按关键字给 size，其它一律返回
+          // 一个 .size 不抛错的对象，永不返回 null。
+          const KOFFI_CORE = `function __siliconleapKoffiStub() {
+            const proxy = new Proxy(function () {}, {
+              get: (_t, prop) => {
+                if (prop === "then") return undefined;
+                if (prop === "size") return 104;
+                return proxy;
+              },
+              apply: (_t, _thisArg, args) => {
+                const name = typeof args[0] === "string" ? args[0] : "";
+                if (name.includes("STARTUPINFO")) return { size: 104 };
+                if (name.includes("PROCESS_INFORMATION")) return { size: 24 };
+                return proxy;
+              },
+              construct: () => ({}),
+            });
+            return proxy;
+          }
+          `;
+          writeFile('lib/node_modules/koffi/index.js', KOFFI_CORE + 'export default __siliconleapKoffiStub();\n', 'koffi index.js stub（加强版）');
+          writeFile('lib/node_modules/koffi/index.cjs', KOFFI_CORE + 'module.exports = __siliconleapKoffiStub();\n', 'koffi index.cjs stub（加强版）');
+          JSEOF
+          echo "--- patch_runtime.js 共 $(wc -l < runtime-builder/patch_runtime.js) 行 ---"
+
       - name: Build Termux runtime
         env:
           TERMUX_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main
@@ -136,16 +270,153 @@ jobs:
           chmod +x runtime-builder/build_runtime.sh runtime-builder/build_node_pty.sh runtime-builder/launcher/run-dsh.sh
           WORK="$RUNNER_TEMP/sl-runtime" OUT="$GITHUB_WORKSPACE/runtime-out" ./runtime-builder/build_runtime.sh 2>&1 | tee /tmp/rt.log
           ls -lh runtime-out/
-          # 补丁没匹配上 = 这个 dsh 版本的代码变了，Android 兼容补丁没打上。
-          # 默认那版只打印 [warn] 就过去了 —— 那样会编出一个“能装但会以奇怪方式坏”的包，
-          # 所以这里把警告升级成硬失败。
-          if grep -qE "\[warn\].*(未匹配|不存在|未匹配到文件|写入失败)" /tmp/rt.log; then
-            echo "::error::有运行时补丁没打上（多半是 dsh 版本变了）。下面是要点："
-            grep -E "\[warn\]" /tmp/rt.log || true
-            echo "::error::换一个更接近 0.1.0-rc.6 的版本再试（比如 0.1.2-rc.1）"
+          # 补丁到底有没有打上，由下一步「校验 Android 补丁」做【正向检查】
+          # （直接查文件里有没有补丁标志 + ESM 语法检查）。
+          # 早先版本是 grep 日志里的 [warn]，但那会把 deps/collect_libs 的无害警告
+          # 也当成失败（例如「可执行文件不存在: .../bin/curl」），反而误报。
+
+      - name: 校验 Android 补丁
+        run: |
+          set -euo pipefail
+          PFX="${PFX:-$RUNNER_TEMP/sl-runtime/prefix/usr}"
+          NM="$PFX/lib/node_modules"
+          echo "校验目录：$NM"
+          fail=0
+
+          check() { # <相对路径> <必须出现的字面量> <说明>
+            local f="$NM/$1"
+            if [ ! -f "$f" ]; then
+              echo "::error::补丁校验失败：文件不存在 $1 —— 这个 dsh 版本里该包被删/改名了（$3）"
+              fail=1
+              return
+            fi
+            if ! grep -qF -- "$2" "$f"; then
+              echo "::error::补丁校验失败：$3 没打上 —— $1 里找不到 \"$2\""
+              fail=1
+            fi
+          }
+
+          absent() { # <相对路径> <不该出现的字面量> <说明>
+            local f="$NM/$1"
+            [ -f "$f" ] || return 0
+            if grep -qF -- "$2" "$f"; then
+              echo "::error::补丁校验失败：$3 —— $1 里仍存在 \"$2\""
+              fail=1
+            fi
+          }
+
+          syntax() { # <相对路径> —— 用 ESM 模式做语法检查（能抓到"重复导入"这类致命问题）
+            local f="$NM/$1"
+            [ -f "$f" ] || return 0
+            if ! node --input-type=module --check < "$f" >/tmp/syntax.err 2>&1; then
+              echo "::error::语法检查失败：$1（这个文件加载会直接抛错）"
+              head -4 /tmp/syntax.err
+              fail=1
+            fi
+          }
+
+          # ── 补丁标志（正向检查：文件里有没有补丁留下的痕迹）────────────────────────
+          check '@deepseek-ai/dsh-subprocess-local/lib/index.js'          '_siliconleapNodePty'      'node-pty 懒加载降级'
+          check '@deepseek-ai/dsh-tool-fs-search/lib/index.js'            'DSH_RG_PATH'              '文件搜索改用 Termux 自带 rg'
+          check '@deepseek-ai/dsh-bash-local/lib/index.js'                'DSH_BASH_PATH'            'bash 指向 nativeLibraryDir'
+          check '@deepseek-ai/dsh-bash-local/lib/index.js'                'DSH_SUBSYSTEM_ARGV'       'bash 走 proot 子系统'
+          check '@deepseek-ai/dsh-bash-local/lib/index.js'                'DSH_SUBSYSTEM_ENV'        'proot glue 的 TMPDIR'
+          check '@deepseek-ai/dsh-bash-local/lib/index.js'                'DSH_ROOT_ARGV'            'root 分区 su 包裹'
+          check '@deepseek-ai/dsh-bash-sandbox/lib/index.js'              'DSH_BASH_PATH'            'sandbox bash 指向 nativeLibraryDir'
+          check '@deepseek-ai/dsh-bash-sandbox/lib/index.js'              'DSH_SUBSYSTEM_ARGV'       'sandbox bash 走 proot 子系统'
+          check '@deepseek-ai/dsh-bash-sandbox/lib/index.js'              'DSH_ROOT_ARGV'            'sandbox root 分区 su 包裹'
+          check '@deepseek-ai/dsh-terminal-bash/lib/index.js'             'DSH_SUBSYSTEM_ARGV'       '终端 bash 走 proot 子系统'
+          check '@deepseek-ai/dsh-sandbox-local/lib/index.js'             'runner: "none"'           'Android 无沙箱降级'
+          check '@deepseek-ai/dsh-sandbox-local/lib/index.js'             'selected.runner === "none"' 'confine() 的 none 分支'
+          check '@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js' 'rename(tmp, finalPath)'   '会话保存绕开 SELinux link 禁令'
+          check '@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js' 'import { rename,'         'rename 有导入（0.1.1 起 import 变了）'
+          check '@deepseek-ai/dsh-attachment-local/lib/index.js'          'await copyFile('          '附件发布改成排他复制'
+          check '@deepseek-ai/dsh-fs-local/lib/index.js'                  'COPYFILE_EXCL=1'          '原子写文件绕开 link()'
+          check '@deepseek-ai/dsh-fs-local/lib/index.js'                  'copyFile, lstat,'         'copyFile 有导入'
+
+          # 不该再出现的（Android 上必然 EACCES / 必崩）
+          absent '@deepseek-ai/dsh-attachment-local/lib/index.js' 'await link('   '附件发布仍在用 link()（Android SELinux 会 EACCES）'
+          absent '@deepseek-ai/dsh-fs-local/lib/index.js'         'await linkFile(' 'fs-local 仍在用 linkFile()'
+
+          # dsh plugin 装配走 node 直接跑 pnpm（文件名带 hash，扫目录）
+          if ! grep -lqF 'PNPM_CJS' "$NM"/@deepseek-ai/dsh/lib/plugin-*.js 2>/dev/null; then
+            echo "::error::补丁校验失败：dsh plugin 的 pnpm 调用没改（WebUI 插件装配会失败）"
+            fail=1
+          fi
+
+          # koffi stub（dsh-win32-process 顶层会读 .size 做 ABI 断言；名字带不带前缀都要能应付）
+          for f in "$NM/koffi/index.js" "$NM/koffi/index.cjs"; do
+            [ -f "$f" ] || { echo "::error::补丁校验失败：缺少 $f（koffi stub）"; fail=1; continue; }
+            grep -qF 'name.includes("STARTUPINFO")' "$f" || {
+              echo "::error::补丁校验失败：$f 是旧的 koffi stub（只认不带前缀的 struct 名字），新版 dsh 会 TypeError"
+              fail=1
+            }
+          done
+
+          # ── 语法检查（ESM 模式；重复导入/括号错位这类问题只有这里能抓到）─────────
+          for f in \
+            '@deepseek-ai/dsh-subprocess-local/lib/index.js' \
+            '@deepseek-ai/dsh-tool-fs-search/lib/index.js' \
+            '@deepseek-ai/dsh-bash-local/lib/index.js' \
+            '@deepseek-ai/dsh-bash-sandbox/lib/index.js' \
+            '@deepseek-ai/dsh-sandbox-local/lib/index.js' \
+            '@deepseek-ai/dsh-terminal-bash/lib/index.js' \
+            '@deepseek-ai/dsh-fs-local/lib/index.js' \
+            '@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js' \
+            '@deepseek-ai/dsh-attachment-local/lib/index.js' ; do
+            syntax "$f"
+          done
+          for f in "$NM"/@deepseek-ai/dsh/lib/plugin-*.js; do
+            [ -f "$f" ] || continue
+            node --input-type=module --check < "$f" >/dev/null 2>&1 || { echo "::error::语法检查失败：$f"; fail=1; }
+          done
+
+          # ── 只提示、不算失败的 ────────────────────────────────────────────────────
+          if [ -f "$NM/@deepseek-ai/dsh-native-command/lib/index.js" ]; then
+            grep -qF 'Android 沙箱限制' "$NM/@deepseek-ai/dsh-native-command/lib/index.js" \
+              && echo "· 可选：native-command 的 Android 中文提示 ✓" \
+              || echo "· 可选：native-command 的 Android 中文提示未应用（只影响一句报错文案）"
+          fi
+          if [ -f "$NM/@deepseek-ai/dsh-host-apiproxy/lib/index.js" ]; then
+            echo "· 检测到老版 dsh-host-apiproxy（0.1.1 及以下）"
+          fi
+          if [ -f /tmp/rt.log ] && grep -qE '\[warn\] (可执行文件不存在|缺失动态库)' /tmp/rt.log; then
+            echo "::warning::jniLibs 里有可执行文件/动态库没集齐，个别 shell 命令可能不可用："
+            grep -E '\[warn\] (可执行文件不存在|缺失动态库)' /tmp/rt.log || true
+          fi
+          if [ -f /tmp/rt.log ] && grep -qF '[warn] pnpm 安装失败' /tmp/rt.log; then
+            echo "::warning::运行时里没装上 pnpm —— 应用首次启动时 WebUI 移动端插件会装配失败（不影响主体功能）"
+          fi
+
+          # ── 模块加载烟测：真正 import 一遍（能抓到"AST 没错但一加载就抛"的问题，
+          #    例如 koffi stub 不匹配导致 ABI 断言失败）。attachment-local 会 import 平台
+          #    相关的 sharp，容易跟补丁无关地失败，所以不放进这个列表。────────────────
+          LOAD_MODULES="dsh-subprocess-local dsh-tool-fs-search dsh-sandbox-local dsh-fs-local dsh-bash-local dsh-bash-sandbox dsh-terminal-bash dsh-session-persistence-jsonl"
+          if NM="$NM" LOAD_MODULES="$LOAD_MODULES" node --input-type=module <<'LOADEOF'
+          const base = process.env.NM + '/@deepseek-ai/'
+          let bad = 0
+          for (const m of process.env.LOAD_MODULES.split(' ')) {
+            try {
+              await import(base + m + '/lib/index.js')
+              console.log(`· 模块加载 OK: ${m}`)
+            } catch (e) {
+              console.log(`::error::模块加载失败 ${m}: ${e && e.message ? e.message : e}`)
+              bad = 1
+            }
+          }
+          process.exit(bad)
+          LOADEOF
+          then :; else
+            echo "::error::有模块一加载就抛错（多半是某个补丁没跟上新版本代码）。把上面带 ::error:: 的行发给我。"
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::有 Android 补丁没打上或改坏了，这个 dsh 版本的代码变了。把上面带 ::error:: 的行发给我。"
             exit 1
           fi
-          echo "补丁全部匹配 ✓"
+          VER="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$NM/@deepseek-ai/dsh/package.json" 2>/dev/null || echo unknown)"
+          echo "补丁全部就位 ✓  dsh $VER"
 
       - name: Set up JDK
         uses: actions/setup-java@v4
