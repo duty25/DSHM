@@ -125,6 +125,51 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zip unzip dpkg dpkg-dev
 
+      # ── 「打开 Harness」按钮要带上启动 token ────────────────────────────────
+      #   dsh <= 0.1.0-rc.6 的网页没有鉴权；0.1.1 起加了启动 token 校验，直接开
+      #   http://127.0.0.1:3082/ 会看到 "dsh web authentication required"。这里让按钮
+      #   从本次 server.log 里取出 dsh 打印的 token 拼进 URL（访问一次即换成 30 天
+      #   有效期的签名 cookie）。找不到源码就报错，不静默放过。
+      - name: 让「打开 Harness」带上启动 token
+        run: |
+          node - <<'NODEEOF'
+          const fs = require('fs')
+
+          const file = 'android/app/src/main/java/com/siliconleap/app/ui/screens/HomeScreen.kt'
+          const MARK = 'Regex("token=([A-Za-z0-9_-]{20,})")'
+          const OLD =
+            'private fun openHarness(context: Context, port: Int) {\n' +
+            '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:$port/"))'
+          const NEW = [
+            'private fun openHarness(context: Context, port: Int) {',
+            '    // dsh >= 0.1.1 的网页加了启动 token 鉴权：直接开 http://127.0.0.1:PORT/ 会返回',
+            '    // 401 "dsh web authentication required"。这里从本次 server.log 里取回 dsh 打印的',
+            '    // token 拼进 URL，访问一次即换成 30 天有效期的签名 cookie，之后裸地址也能开。',
+            '    val token = runCatching {',
+            '        val log = com.siliconleap.app.runtime.TermuxEnv.serverLog(context)',
+            '        if (!log.exists()) null else Regex("token=([A-Za-z0-9_-]{20,})").find(log.readText())?.groupValues?.get(1)',
+            '    }.getOrNull()',
+            '    val url = if (token != null) "http://127.0.0.1:$port/?token=$token" else "http://127.0.0.1:$port/"',
+            '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))',
+          ].join('\n')
+
+          if (!fs.existsSync(file)) {
+            console.log('::error::找不到 ' + file + '（token 补丁没打上）')
+            process.exit(1)
+          }
+          const src = fs.readFileSync(file, 'utf8')
+          if (src.includes(MARK)) {
+            console.log('HomeScreen.kt: token 补丁已存在，跳过')
+            process.exit(0)
+          }
+          if (!src.includes(OLD)) {
+            console.log('::error::HomeScreen.kt 里没找到 openHarness 的原始源码 —— token 补丁没打上')
+            process.exit(1)
+          }
+          fs.writeFileSync(file, src.replace(OLD, NEW))
+          console.log('HomeScreen.kt: 「打开 Harness」已改为带 token 的 URL')
+          NODEEOF
+
       # ── 给新版 dsh 补上原补丁没覆盖的地方 ─────────────────────────────────────
       #   runtime-builder/patch_runtime.js 是按 dsh 0.1.0-rc.6 写的；0.1.1 起有 4 处对不上
       #   （tool-fs-search 的 rg 路径、apiproxy 包被删、session-persistence 的 import、
@@ -256,6 +301,49 @@ jobs:
           `;
           writeFile('lib/node_modules/koffi/index.js', KOFFI_CORE + 'export default __siliconleapKoffiStub();\n', 'koffi index.js stub（加强版）');
           writeFile('lib/node_modules/koffi/index.cjs', KOFFI_CORE + 'module.exports = __siliconleapKoffiStub();\n', 'koffi index.cjs stub（加强版）');
+
+          // Patch 20: node-addon-system 的 flock 在 Android 上直接抛
+          //   "flock is not supported on android-arm64"（ERR_FLOCK_UNSUPPORTED_PLATFORM）。
+          // dsh >= 0.1.1 的 session-persistence 用 flock 给会话目录加"跨进程写锁"(lease)，
+          // 这个抛错会冒到外层 → 保存会话失败 → 整轮对话失败。
+          // （0.1.0-rc.6 完全没有 flock —— 又是升级带出来的新问题。）
+          // 上游对 browser worker 的做法就是"让 flock 立即成功"：单进程里，进程内的写占用
+          // 已经排除了其它写者。DSHM 的运行时同样是单进程，这里照做。
+          patchFile(
+            'lib/node_modules/@deepseek-ai/node-addon-system/lib/flock.js',
+            (src) => {
+              if (src.includes('DSHM: Android')) return src;
+              return src.replace(
+                /export async function tryLockExclusive\(fd\) \{\n/,
+                "export async function tryLockExclusive(fd) {\n" +
+                  "    // DSHM: Android 上 Node 是 bionic 原生运行，没有 node-addon-system 的\n" +
+                  "    // 原生 flock，也没有对应平台包。按上游 browser worker 的做法让它立即成功。\n" +
+                  "    if (process.platform === 'android') return;\n",
+              );
+            },
+            'node-addon-system flock 在 Android 上降级为立即成功',
+          );
+
+          // Patch 21: sharp 没有 Android 预编译包（官方只发 darwin / linux / linuxmusl /
+          // win32 / wasm32），bionic 上的 Node 加载 sharp 会抛
+          //   Could not load the "sharp" module using the android-arm64 runtime
+          // → dsh-attachment-local 整个模块加载失败。这里把 sharp 的入口换成"调用时才报错"
+          // 的桩（和上面 koffi 桩同一个思路）：模块能正常加载，只有真正做图片处理时才抛错，
+          // 而 probeImage 已经把它转成 INVALID_IMAGE 这类干净错误。
+          const SHARP_STUB = `/* DSHM: Android 上没有 sharp 预编译包，这里用桩让模块能加载。 */
+          function __dshmSharpUnavailable() {
+            throw new Error('[DSHM] Android 上不支持图片处理（sharp 无 android 预编译包）');
+          }
+          function __dshmSharpStub() {
+            return __dshmSharpUnavailable();
+          }
+          __dshmSharpStub.cache = __dshmSharpUnavailable;
+          __dshmSharpStub.concurrency = __dshmSharpUnavailable;
+          __dshmSharpStub.simd = __dshmSharpUnavailable;
+          __dshmSharpStub.versions = { sharp: 'stub' };
+          `;
+          writeFile('lib/node_modules/sharp/dist/index.mjs', SHARP_STUB + 'export default __dshmSharpStub;\n', 'sharp ESM 桩（Android 无 sharp）');
+          writeFile('lib/node_modules/sharp/dist/index.cjs', SHARP_STUB + 'module.exports = __dshmSharpStub;\n', 'sharp CJS 桩（Android 无 sharp）');
           JSEOF
           echo "--- patch_runtime.js 共 $(wc -l < runtime-builder/patch_runtime.js) 行 ---"
 
@@ -305,14 +393,17 @@ jobs:
             fi
           }
 
-          syntax() { # <相对路径> —— 用 ESM 模式做语法检查（能抓到"重复导入"这类致命问题）
+          syntax() { # <相对路径> —— 语法检查（能抓到"重复导入"这类致命问题）
+            # 两种方式都试：不同 Node 版本判定 ESM 的方式不一样（文件参数依赖 package.json
+            # 的 type 字段，stdin 形式靠 --input-type=module 强制）。只要一种通过就不算错，
+            # 避免因 Node 版本差异误报。
             local f="$NM/$1"
             [ -f "$f" ] || return 0
-            if ! node --input-type=module --check < "$f" >/tmp/syntax.err 2>&1; then
-              echo "::error::语法检查失败：$1（这个文件加载会直接抛错）"
-              head -4 /tmp/syntax.err
-              fail=1
-            fi
+            if node --check "$f" >/tmp/syntax.err 2>&1; then return 0; fi
+            if node --input-type=module --check < "$f" >/tmp/syntax.err 2>&1; then return 0; fi
+            echo "::error::语法检查失败：$1（这个文件加载会直接抛错）"
+            head -4 /tmp/syntax.err
+            fail=1
           }
 
           # ── 补丁标志（正向检查：文件里有没有补丁留下的痕迹）────────────────────────
@@ -353,6 +444,21 @@ jobs:
             }
           done
 
+          # flock：只有这个版本确实带了「非 linux/darwin 就抛错」的平台门时才需要这条补丁
+          # （0.1.0-rc.6 根本没有 flock；万一以后又去掉，也不该因此判失败）
+          FLOCK="$NM/@deepseek-ai/node-addon-system/lib/flock.js"
+          if [ -f "$FLOCK" ] && grep -qF 'ERR_FLOCK_UNSUPPORTED_PLATFORM' "$FLOCK"; then
+            check '@deepseek-ai/node-addon-system/lib/flock.js' "process.platform === 'android'" 'flock 在 Android 上降级为立即成功'
+          else
+            echo "· 该版本的 flock 没有平台门（或没有 flock.js），不需要这条补丁"
+          fi
+
+          # sharp：Android 没有官方预编译包，必须换成桩，否则 attachment-local 整个模块加载失败
+          if [ -f "$NM/sharp/package.json" ]; then
+            check 'sharp/dist/index.mjs' '__dshmSharpStub' 'sharp 桩（Android 无 sharp 预编译包）'
+            check 'sharp/dist/index.cjs' '__dshmSharpStub' 'sharp 桩（CJS 入口）'
+          fi
+
           # ── 语法检查（ESM 模式；重复导入/括号错位这类问题只有这里能抓到）─────────
           for f in \
             '@deepseek-ai/dsh-subprocess-local/lib/index.js' \
@@ -391,7 +497,7 @@ jobs:
           # ── 模块加载烟测：真正 import 一遍（能抓到"AST 没错但一加载就抛"的问题，
           #    例如 koffi stub 不匹配导致 ABI 断言失败）。attachment-local 会 import 平台
           #    相关的 sharp，容易跟补丁无关地失败，所以不放进这个列表。────────────────
-          LOAD_MODULES="dsh-subprocess-local dsh-tool-fs-search dsh-sandbox-local dsh-fs-local dsh-bash-local dsh-bash-sandbox dsh-terminal-bash dsh-session-persistence-jsonl"
+          LOAD_MODULES="dsh-subprocess-local dsh-tool-fs-search dsh-sandbox-local dsh-fs-local dsh-bash-local dsh-bash-sandbox dsh-terminal-bash dsh-session-persistence-jsonl dsh-attachment-local"
           if NM="$NM" LOAD_MODULES="$LOAD_MODULES" node --input-type=module <<'LOADEOF'
           const base = process.env.NM + '/@deepseek-ai/'
           let bad = 0
