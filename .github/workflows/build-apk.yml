@@ -135,10 +135,14 @@ jobs:
 
       # ⚠️ 不能用 android-actions/setup-android：它内部写死的 cmdline-tools 版本
       #    15859902 已被 Google 从 dl.google.com 撤掉，下载直接 404（该 action 的
-      #    open issue #536，2026-08-20 开的；@v4 同样中招，日志里就是这个 404）。
+      #    open issue #536，2026-08-20 开的；@v4 同样中招）。
       #    ubuntu-latest 镜像自带 Android SDK + cmdline-tools，直接用即可。
-      - name: Set up Android SDK (改用镜像自带的，跳过坏掉的 action)
+      #
+      #    注意：$GITHUB_PATH 只对【后续步骤】生效，对当前步骤无效 —— 所以这里
+      #    全程用绝对路径调用 sdkmanager（上一版就是因为这个踩了 exit 127）。
+      - name: Android SDK（用镜像自带的，跳过坏掉的 action）
         run: |
+          set -x
           SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           echo "SDK=$SDK"
           ls "$SDK" || true
@@ -147,17 +151,14 @@ jobs:
             CT="$(dirname "$(find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager 2>/dev/null | head -1)")"
           fi
           echo "cmdline-tools=$CT"
-          test -x "$CT/sdkmanager" || { echo "::error::找不到 sdkmanager"; exit 1; }
+          test -x "$CT/sdkmanager" || { echo "::error::找不到 sdkmanager（SDK=$SDK）"; exit 1; }
+          "$CT/sdkmanager" --version
+          "$CT/sdkmanager" --install "platforms;android-37.0" "build-tools;37.0.0"
+          yes | "$CT/sdkmanager" --licenses > /dev/null 2>&1 || true
           echo "$CT" >> "$GITHUB_PATH"
           echo "$SDK/platform-tools" >> "$GITHUB_PATH"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          sdkmanager --version
-
-      - name: Install Android SDK platform 37
-        run: |
-          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
-          sdkmanager --licenses
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
