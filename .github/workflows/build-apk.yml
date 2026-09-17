@@ -32,6 +32,8 @@ jobs:
 
       - name: Build Debian subsystem assets
         env:
+          # 必须显式传：脚本读的是 GITHUB_REPO，不是 Actions 自动注入的 GITHUB_REPOSITORY
+          GITHUB_REPO: ${{ github.repository }}
           TERMUX_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main
           SUBSYS_FLAVOR: debian
           SUBSYS_TAG: debian-subsystem
@@ -42,6 +44,8 @@ jobs:
 
       - name: Build Ubuntu subsystem assets
         env:
+          # 必须显式传：脚本读的是 GITHUB_REPO，不是 Actions 自动注入的 GITHUB_REPOSITORY
+          GITHUB_REPO: ${{ github.repository }}
           TERMUX_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main
           SUBSYS_FLAVOR: ubuntu
           SUBSYS_TAG: ubuntu-subsystem
@@ -127,31 +131,142 @@ jobs:
 
       # ── 「打开 Harness」按钮要带上启动 token ────────────────────────────────
       #   dsh <= 0.1.0-rc.6 的网页没有鉴权；0.1.1 起加了启动 token 校验，直接开
-      #   http://127.0.0.1:3082/ 会看到 "dsh web authentication required"。这里让按钮
-      #   从本次 server.log 里取出 dsh 打印的 token 拼进 URL（访问一次即换成 30 天
-      #   有效期的签名 cookie）。找不到源码就报错，不静默放过。
+      #   http://127.0.0.1:3082/ 会看到 "dsh web authentication required"。
+      #   做法：RuntimeManager 在读取 harness 输出的当下，就把 dsh 打印的那行带
+      #   token 网址抓下来存内存（DSHM 的日志是「内存环形缓冲 + 攒够 32 行才落盘」，
+      #   事后读文件或读日志都可能拿不到）；「打开 Harness」优先用它，另有内存日志、
+      #   日志文件两级兜底。找不到源码就报错，不静默放过。
       - name: 让「打开 Harness」带上启动 token
         run: |
           node - <<'NODEEOF'
           const fs = require('fs')
 
-          const file = 'android/app/src/main/java/com/siliconleap/app/ui/screens/HomeScreen.kt'
-          const MARK = 'dshWebUrlPattern'
+          // 这个补丁改两个文件：
+          //   1) RuntimeManager.kt —— 读到 harness 输出的当下就把带 token 的网址存下来
+          //                          （内存 + 一个随服务启动重置的小文件），并提供提取函数
+          //   2) HomeScreen.kt     —— 「打开 Harness」按可靠性依次取用
+          //
+          // 为什么这么做：DSHM 的 LogStore 是「内存环形缓冲(600 行) + 攒够 32 行才落盘」。
+          // 更麻烦的是：App 被后台划掉再打开时，如果旧的 harness 进程还活着，App 会直接
+          // 复用它、不会重启服务 —— 这时内存缓冲是空的、磁盘上可能只有很旧的网址。
+          // 所以在"读到那一行"的当下就存下来最可靠。
+
+          const RM = 'android/app/src/main/java/com/siliconleap/app/runtime/RuntimeManager.kt'
+          const HS = 'android/app/src/main/java/com/siliconleap/app/ui/screens/HomeScreen.kt'
+
+          function patchFile(file, marker, oldText, newText, okMsg) {
+            if (!fs.existsSync(file)) {
+              console.log('::error::找不到 ' + file + '（token 补丁没打上）')
+              process.exit(1)
+            }
+            const src = fs.readFileSync(file, 'utf8')
+            if (src.includes(marker)) {
+              console.log(file.split('/').pop() + ': 已打过，跳过')
+              return
+            }
+            if (!src.includes(oldText)) {
+              console.log('::error::' + file + ' 里没找到要替换的原始源码 —— token 补丁没打上')
+              process.exit(1)
+            }
+            fs.writeFileSync(file, src.replace(oldText, newText))
+            console.log(okMsg)
+          }
+
+          const ANSI_RE = String.raw`Regex("\\u001B\\[[0-9;]*[A-Za-z]")`
+          const TOKEN_URL_RE = String.raw`Regex("http://\\S*?\\?token=[A-Za-z0-9_\\-]+={0,2}")`
+          const DSH_WEB_RE = String.raw`Regex("dsh web:\\s*(http://\\S+)")`
+
+          // ── 1a) RuntimeManager.kt：提取函数（先剥 ANSI 颜色码，再按两种形态找）────────
+          patchFile(
+            RM,
+            'fun extractHarnessUrl',
+            '    fun tailLog(lines: Int = 80): String {',
+            [
+              '    /** DSHM: 从任意日志文本里提取 dsh 打印的带 token 网址（没有就返回 null）。 */',
+              '    fun extractHarnessUrl(text: String): String? {',
+              '        // 保险：万一输出里带 ANSI 颜色码，先剥掉再匹配',
+              `        val clean = text.replace(${ANSI_RE}, "")`,
+              '        // 首选：直接找带 token 的网址（不依赖前缀文案）',
+              `        ${TOKEN_URL_RE}.find(clean)?.let { return it.value }`,
+              '        // 退而求其次：dsh 打印的那一行',
+              `        ${DSH_WEB_RE}.find(clean)?.let { return it.groupValues[1] }`,
+              '        return null',
+              '    }',
+              '',
+              '    /** DSHM: dsh 启动时打印的带 token 网址（内存 + 小文件，随服务启动一起重置）。 */',
+              '    @Volatile',
+              '    private var capturedHarnessUrl: String? = null',
+              '',
+              '    /** DSHM: 供「打开 Harness」取用；还没捕获到就返回 null。 */',
+              '    fun harnessUrl(): String? = capturedHarnessUrl ?: runCatching {',
+              '        val f = File(TermuxEnv.logs(appContext), "harness-url.txt")',
+              '        if (!f.exists()) return@runCatching null',
+              '        val text = f.readText().trim()',
+              '        if (text.isEmpty()) null else text',
+              '    }.getOrNull()',
+              '',
+              '    fun tailLog(lines: Int = 80): String {',
+            ].join('\n'),
+            'RuntimeManager.kt: 已加入 extractHarnessUrl() / harnessUrl()'
+          )
+
+          // ── 1b) RuntimeManager.kt：读到那一行时立刻捕获（内存 + 小文件）──────────────
+          patchFile(
+            RM,
+            'capturedHarnessUrl',
+            '                for (line in reader.lineSequence()) {\n' +
+              '                    log.append(line)\n' +
+              '                }',
+            [
+              '                for (line in reader.lineSequence()) {',
+              '                    log.append(line)',
+              '                    // DSHM: 读到 dsh 打印的带 token 网址就立刻存下来（内存 + 小文件），',
+              '                    // 不依赖日志落盘时机、也不怕日志环形缓冲把它挤掉。',
+              '                    runCatching {',
+              '                        extractHarnessUrl(line)?.let {',
+              '                            capturedHarnessUrl = it',
+              '                            runCatching {',
+              '                                File(TermuxEnv.logs(appContext), "harness-url.txt").writeText(it)',
+              '                            }',
+              '                        }',
+              '                    }',
+              '                }',
+            ].join('\n'),
+            'RuntimeManager.kt: 已在读取 harness 输出时捕获带 token 的网址'
+          )
+
+          // ── 1c) RuntimeManager.kt：每次启动服务时把捕获的网址一起清掉 ────────────────
+          patchFile(
+            RM,
+            'capturedHarnessUrl = null',
+            '    private fun clearLog() {\n' +
+              '        LogStore.named(TermuxEnv.serverLog(appContext)).clear()',
+            [
+              '    private fun clearLog() {',
+              '        LogStore.named(TermuxEnv.serverLog(appContext)).clear()',
+              '        // DSHM: 换一个 harness 进程就换一个 token，所以启动时把上次捕获的网址清掉，',
+              '        // 免得「打开 Harness」拿到旧 token 又变成 401。',
+              '        capturedHarnessUrl = null',
+              '        runCatching { File(TermuxEnv.logs(appContext), "harness-url.txt").delete() }',
+            ].join('\n'),
+            'RuntimeManager.kt: 启动服务时清掉上次捕获的网址'
+          )
+
+          // ── 2) HomeScreen.kt：打开时按可靠性依次取网址 ──────────────────────────────
           const OLD =
             'private fun openHarness(context: Context, port: Int) {\n' +
             '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:$port/"))'
           const NEW = [
             'private fun openHarness(context: Context, port: Int) {',
-            '    // dsh >= 0.1.1 的网页加了启动 token 鉴权：直接开 http://127.0.0.1:PORT/ 会返回',
-            '    // 401 "dsh web authentication required"。这里改为直接使用 dsh 自己打印的那行',
-            '    // 网址（已经带好 token）。',
-            '    // 关键：要读【内存日志缓冲】（RuntimeManager.tailLog），不能直接读日志文件 ——',
-            '    // LogStore 是批量落盘的（攒够 32 行才 flush），启动那几行在服务运行期间可能',
-            '    // 一直没写到磁盘上；界面上「查看运行日志」读的正是内存缓冲，所以那边看得到。',
-            String.raw`    val dshWebUrlPattern = Regex("dsh web:\\s*(http://\\S+)")`,
-            '    var printedUrl = runCatching {',
-            '        dshWebUrlPattern.find(RuntimeManager.tailLog(600))?.groupValues?.get(1)',
-            '    }.getOrNull()',
+            '    // dsh >= 0.1.1 的网页加了启动 token 鉴权：裸地址会返回 401',
+            '    // "dsh web authentication required"。按可靠性依次取 dsh 打印的那行网址：',
+            '    //   1) RuntimeManager 在读到 harness 输出时抓下来的（内存 / 随服务启动的小文件）',
+            '    //   2) 内存日志缓冲里的（界面「查看运行日志」看的就是它）',
+            '    //   3) 日志文件开头 8KB（进程重启后内存为空时的兜底）',
+            '    var printedUrl = RuntimeManager.harnessUrl()',
+            '    if (printedUrl == null) {',
+            '        printedUrl = RuntimeManager.extractHarnessUrl(RuntimeManager.tailLog(600))',
+            '    }',
             '    if (printedUrl == null) {',
             '        printedUrl = runCatching {',
             '            val log = com.siliconleap.app.runtime.TermuxEnv.serverLog(context)',
@@ -161,31 +276,24 @@ jobs:
             '                val n = minOf(raf.length(), 8192L).toInt()',
             '                val buf = ByteArray(n)',
             '                raf.readFully(buf)',
-            '                dshWebUrlPattern.find(String(buf, Charsets.UTF_8))?.groupValues?.get(1)',
+            '                RuntimeManager.extractHarnessUrl(String(buf, Charsets.UTF_8))',
             '            } finally {',
             '                raf.close()',
             '            }',
             '        }.getOrNull()',
             '    }',
+            '    if (printedUrl == null) {',
+            '        android.widget.Toast.makeText(',
+            '            context,',
+            '            "没找到 dsh 打印的网址，用默认地址打开（可能仍会要求鉴权）",',
+            '            android.widget.Toast.LENGTH_LONG,',
+            '        ).show()',
+            '    }',
             '    val url = printedUrl ?: "http://127.0.0.1:$port/"',
             '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))',
           ].join('\n')
 
-          if (!fs.existsSync(file)) {
-            console.log('::error::找不到 ' + file + '（token 补丁没打上）')
-            process.exit(1)
-          }
-          const src = fs.readFileSync(file, 'utf8')
-          if (src.includes(MARK)) {
-            console.log('HomeScreen.kt: token 补丁已存在，跳过')
-            process.exit(0)
-          }
-          if (!src.includes(OLD)) {
-            console.log('::error::HomeScreen.kt 里没找到 openHarness 的原始源码 —— token 补丁没打上')
-            process.exit(1)
-          }
-          fs.writeFileSync(file, src.replace(OLD, NEW))
-          console.log('HomeScreen.kt: 「打开 Harness」已改为使用 dsh 打印的带 token 网址')
+          patchFile(HS, 'RuntimeManager.harnessUrl()', OLD, NEW, 'HomeScreen.kt: 「打开 Harness」优先使用带 token 的网址')
           NODEEOF
 
       # ── 让容器里也能看到手机共享存储（原路径）──────────────────────────────
