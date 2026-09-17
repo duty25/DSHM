@@ -136,20 +136,38 @@ jobs:
           const fs = require('fs')
 
           const file = 'android/app/src/main/java/com/siliconleap/app/ui/screens/HomeScreen.kt'
-          const MARK = 'Regex("token=([A-Za-z0-9_-]{20,})")'
+          const MARK = 'dshWebUrlPattern'
           const OLD =
             'private fun openHarness(context: Context, port: Int) {\n' +
             '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:$port/"))'
           const NEW = [
             'private fun openHarness(context: Context, port: Int) {',
             '    // dsh >= 0.1.1 的网页加了启动 token 鉴权：直接开 http://127.0.0.1:PORT/ 会返回',
-            '    // 401 "dsh web authentication required"。这里从本次 server.log 里取回 dsh 打印的',
-            '    // token 拼进 URL，访问一次即换成 30 天有效期的签名 cookie，之后裸地址也能开。',
-            '    val token = runCatching {',
-            '        val log = com.siliconleap.app.runtime.TermuxEnv.serverLog(context)',
-            '        if (!log.exists()) null else Regex("token=([A-Za-z0-9_-]{20,})").find(log.readText())?.groupValues?.get(1)',
+            '    // 401 "dsh web authentication required"。这里改为直接使用 dsh 自己打印的那行',
+            '    // 网址（已经带好 token）。',
+            '    // 关键：要读【内存日志缓冲】（RuntimeManager.tailLog），不能直接读日志文件 ——',
+            '    // LogStore 是批量落盘的（攒够 32 行才 flush），启动那几行在服务运行期间可能',
+            '    // 一直没写到磁盘上；界面上「查看运行日志」读的正是内存缓冲，所以那边看得到。',
+            String.raw`    val dshWebUrlPattern = Regex("dsh web:\\s*(http://\\S+)")`,
+            '    var printedUrl = runCatching {',
+            '        dshWebUrlPattern.find(RuntimeManager.tailLog(600))?.groupValues?.get(1)',
             '    }.getOrNull()',
-            '    val url = if (token != null) "http://127.0.0.1:$port/?token=$token" else "http://127.0.0.1:$port/"',
+            '    if (printedUrl == null) {',
+            '        printedUrl = runCatching {',
+            '            val log = com.siliconleap.app.runtime.TermuxEnv.serverLog(context)',
+            '            if (!log.exists()) return@runCatching null',
+            '            val raf = java.io.RandomAccessFile(log, "r")',
+            '            try {',
+            '                val n = minOf(raf.length(), 8192L).toInt()',
+            '                val buf = ByteArray(n)',
+            '                raf.readFully(buf)',
+            '                dshWebUrlPattern.find(String(buf, Charsets.UTF_8))?.groupValues?.get(1)',
+            '            } finally {',
+            '                raf.close()',
+            '            }',
+            '        }.getOrNull()',
+            '    }',
+            '    val url = printedUrl ?: "http://127.0.0.1:$port/"',
             '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))',
           ].join('\n')
 
@@ -167,8 +185,53 @@ jobs:
             process.exit(1)
           }
           fs.writeFileSync(file, src.replace(OLD, NEW))
-          console.log('HomeScreen.kt: 「打开 Harness」已改为带 token 的 URL')
+          console.log('HomeScreen.kt: 「打开 Harness」已改为使用 dsh 打印的带 token 网址')
           NODEEOF
+
+      # ── 让容器里也能看到手机共享存储（原路径）──────────────────────────────
+      #   和 Termux 版对齐：把 /storage/emulated/0 以【同一个绝对路径】bind 进 proot，
+      #   这样容器里用的就是 /storage/emulated/0/DSHM/... 这种宿主路径。
+      #   要真正读写，手机上还需在「设置 → 工作区与权限 → 文件访问权限」授予
+      #   「所有文件访问」；没授权也能用，只是那个目录读不了内容。
+      - name: 让容器能看到共享存储（原路径 bind）
+        run: |
+          node - <<'NODEEOF2'
+          const fs = require('fs')
+
+          const file = 'android/app/src/main/java/com/siliconleap/app/runtime/TermuxEnv.kt'
+          const MARK = 'DSHM: 共享存储原路径 bind'
+          const OLD =
+            '        argv += "-b"; argv += "${tmp(context).absolutePath}:/tmp"\n' +
+            '        argv += "/bin/bash"'
+          const NEW = [
+            '        // DSHM: 共享存储原路径 bind —— 让容器里也能用 /storage/emulated/0/... 这种',
+            '        // 和宿主完全一样的路径（Termux 版就是这个行为）。注意：要真正读写，',
+            '        // 需要在「设置 → 工作区与权限 → 文件访问权限」里授予「所有文件访问」，',
+            '        // 否则路径可见但内容会 EACCES。',
+            '        val sharedStorage = File("/storage/emulated/0")',
+            '        if (sharedStorage.isDirectory) {',
+            '            argv += "-b"; argv += "${sharedStorage.absolutePath}:${sharedStorage.absolutePath}"',
+            '        }',
+            '        argv += "-b"; argv += "${tmp(context).absolutePath}:/tmp"',
+            '        argv += "/bin/bash"',
+          ].join('\n')
+
+          if (!fs.existsSync(file)) {
+            console.log('::error::找不到 ' + file + '（共享存储 bind 补丁没打上）')
+            process.exit(1)
+          }
+          const src = fs.readFileSync(file, 'utf8')
+          if (src.includes(MARK)) {
+            console.log('TermuxEnv.kt: 共享存储 bind 补丁已存在，跳过')
+            process.exit(0)
+          }
+          if (!src.includes(OLD)) {
+            console.log('::error::TermuxEnv.kt 里没找到 proot argv 的收尾两行 —— 共享存储 bind 补丁没打上')
+            process.exit(1)
+          }
+          fs.writeFileSync(file, src.replace(OLD, NEW))
+          console.log('TermuxEnv.kt: 已把 /storage/emulated/0 以原路径 bind 进容器')
+          NODEEOF2
 
       # ── 给新版 dsh 补上原补丁没覆盖的地方 ─────────────────────────────────────
       #   runtime-builder/patch_runtime.js 是按 dsh 0.1.0-rc.6 写的；0.1.1 起有 4 处对不上
