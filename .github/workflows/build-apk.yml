@@ -141,7 +141,7 @@ jobs:
           node - <<'NODEEOF'
           const fs = require('fs')
 
-          // token-fix v5：这次一共改两个文件、六处
+          // token-fix v5 + cookie-fix v1：这次一共改两个文件、六处
           //   1) RuntimeManager.kt
           //      a) extractHarnessUrl() + harnessUrl() + 两个内部字段
           //      b) 读到 harness 输出时立刻捕获带 token 的网址（内存 + 小文件）
@@ -153,7 +153,7 @@ jobs:
 
           const RM = 'android/app/src/main/java/com/siliconleap/app/runtime/RuntimeManager.kt'
           const HS = 'android/app/src/main/java/com/siliconleap/app/ui/screens/HomeScreen.kt'
-          const MARK = 'token-fix-v5'
+          const MARK = 'token-fix-v6'
 
           function patchFile(file, marker, oldText, newText, okMsg) {
             if (!fs.existsSync(file)) {
@@ -217,7 +217,7 @@ jobs:
           // ── 1b) 读到那一行时立刻捕获 ────────────────────────────────────────────────
           patchFile(
             RM,
-            'capturedHarnessUrl',
+            '不依赖日志落盘时机',
             '                for (line in reader.lineSequence()) {\n' +
               '                    log.append(line)\n' +
               '                }',
@@ -253,7 +253,7 @@ jobs:
               '        capturedHarnessUrl = null',
               '        runCatching { File(TermuxEnv.logs(appContext), "harness-url.txt").delete() }',
               '        // DSHM: 版本标记 —— 在「查看运行日志」里能直接看到装的是哪一版补丁',
-              '        appendLog("[DSHM] 补丁版本 token-fix-v5 (2026-09-17)")',
+              '        appendLog("[DSHM] 补丁版本 token-fix-v6 (2026-09-17)")',
             ].join('\n'),
             'RuntimeManager.kt: clearLog 已清旧网址并写入版本标记'
           )
@@ -325,6 +325,152 @@ jobs:
       #   这样容器里用的就是 /storage/emulated/0/DSHM/... 这种宿主路径。
       #   要真正读写，手机上还需在「设置 → 工作区与权限 → 文件访问权限」授予
       #   「所有文件访问」；没授权也能用，只是那个目录读不了内容。
+      # ── 修「打开 Harness」第一次打开就 401 ─────────────────────────────────
+      #   dsh >= 0.1.1 的网页会话 cookie 是 SameSite=Strict。从外部 App 点「打开
+      #   Harness」时，浏览器把这次导航看作【跨站】：token 换 cookie 那一步（303 跳回 /）
+      #   之后的请求不会带上刚下发的 cookie，于是第一次打开看到
+      #   "dsh web authentication required"，手动刷新一次才正常。
+      #   运行时已经在手机上（重下要 ~500 MB），所以让 App 在启动服务前就地改掉那一处
+      #   属性；幂等，重装运行时后首次启动也会自动再补一次。
+      - name: 修「打开 Harness」首次打开 401（运行时 cookie）
+        run: |
+          node - <<'NODEEOF3'
+          const fs = require('fs')
+
+          // cookie-fix v1：把【已安装】运行时里 dsh 网页会话 cookie 的 SameSite=Strict 就地改成 Lax。
+          //
+          // 背景（已按 dsh 0.1.5-rc.2 源码逐行核对）：
+          //   dsh-client-connection 的 authorizeIndex()：
+          //     · GET /?token=X 且 token 对 → 303 跳回 / 并 Set-Cookie（HttpOnly; SameSite=Strict）
+          //     · 已有有效 cookie → 303 跳回 /
+          //     · 其它 → 401 "dsh web authentication required"
+          //   从外部 App（「打开 Harness」按钮）发起导航时，浏览器把这次导航看作【跨站】：
+          //   303 之后那一跳虽然同源，但继承的仍是跨站身份，SameSite=Strict 的 cookie 不放行
+          //   → 第一次打开必然 401；手动刷新是浏览器自己发起的同站导航，于是又正常了。
+          //   改成 Lax（顶层 GET 跳转放行）之后第一次就能进。
+          //
+          // 为什么就地改文件：运行时约 500 MB，重下对手机不友好；这里只改一处属性，幂等 ——
+          // 重装运行时后首次启动会自动再补一次。
+
+          const RM = 'android/app/src/main/java/com/siliconleap/app/runtime/RuntimeManager.kt'
+
+          /** 按锚点做一次替换；锚点必须恰好出现一次，否则硬失败（不静默放过）。 */
+          function patchOnce(marker, oldText, newText, okMsg) {
+            if (!fs.existsSync(RM)) {
+              console.log('::error::找不到 ' + RM + '（cookie 补丁没打上）')
+              process.exit(1)
+            }
+            const src = fs.readFileSync(RM, 'utf8')
+            if (src.includes(marker)) {
+              console.log('RuntimeManager.kt: 这一处已打过，跳过')
+              return
+            }
+            const hits = src.split(oldText).length - 1
+            if (hits !== 1) {
+              console.log('::error::锚点在 ' + RM + ' 里出现 ' + hits + ' 次（应为 1 次）—— cookie 补丁没打上: ' + JSON.stringify(oldText.slice(0, 70)))
+              process.exit(1)
+            }
+            fs.writeFileSync(RM, src.replace(oldText, newText))
+            console.log(okMsg)
+          }
+
+          // ── 1) 新增 patchRuntimeAuthCookie()（插在 startServerIfNeeded 之前）───────────
+          patchOnce(
+            '// DSHM: 运行时 cookie 补丁（就地改 SameSite=Strict → Lax）',
+            '    private suspend fun startServerIfNeeded() {',
+            [
+              '    // DSHM: 运行时 cookie 补丁（就地改 SameSite=Strict → Lax）',
+              '    /**',
+              '     * DSHM: 把已安装运行时里 dsh 网页会话 cookie 的 SameSite=Strict 就地改成 Lax。',
+              '     *',
+              '     * 为什么必须改：dsh >= 0.1.1 的网页鉴权是「GET /?token=... → 303 跳回 / 并下发',
+              '     * cookie」。从外部 App（「打开 Harness」按钮）发起导航时，浏览器把它当作跨站导航，',
+              '     * SameSite=Strict 的 cookie 在 303 之后那一跳不会被带上 —— 于是 token 是对的、cookie',
+              '     * 也已经下发，用户看到的却仍是 401 "dsh web authentication required"，手动刷新一次',
+              '     * （浏览器自己发起的同站导航）才正常。改成 Lax 后顶层 GET 跳转放行，第一次就能进。',
+              '     *',
+              '     * 就地改文件而不是重下运行时：运行时约 500 MB；这里只改一处属性，幂等，装上新 APK',
+              '     * 后首次启动即生效，重装运行时之后也会自动再补一次。',
+              '     *',
+              '     * @return true 表示本次真的改写了文件（调用方应重启服务让新代码生效）',
+              '     */',
+              '    private fun patchRuntimeAuthCookie(): Boolean {',
+              '        val rel = "lib/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js"',
+              '        val file = File(TermuxEnv.prefix(appContext), rel)',
+              '        if (!file.isFile) {',
+              '            appendLog("[DSHM] 运行时 cookie 补丁: 还没装运行时，找不到 $rel（跳过）")',
+              '            return false',
+              '        }',
+              '        val text = runCatching { file.readText() }.getOrNull()',
+              '        if (text == null) {',
+              '            appendLog("[DSHM] 运行时 cookie 补丁: 读取 $rel 失败（跳过）")',
+              '            return false',
+              '        }',
+              '        if (!text.contains("SameSite=Strict")) {',
+              '            if (text.contains("SameSite=Lax")) {',
+              '                appendLog("[DSHM] 运行时 cookie 补丁: 已是 Lax，无需改动")',
+              '            } else {',
+              '                appendLog("[DSHM] 运行时 cookie 补丁: 没找到 SameSite 属性（未改动）")',
+              '            }',
+              '            return false',
+              '        }',
+              '        val wrote = runCatching {',
+              '            file.writeText(text.replace("SameSite=Strict", "SameSite=Lax"))',
+              '        }.isSuccess',
+              '        if (wrote) {',
+              '            appendLog("[DSHM] 运行时 cookie 补丁: SameSite Strict → Lax（修「首次打开 401」）")',
+              '        } else {',
+              '            appendLog("[DSHM] 运行时 cookie 补丁: 写入失败，本次未生效")',
+              '        }',
+              '        return wrote',
+              '    }',
+              '',
+              '    private suspend fun startServerIfNeeded() {',
+            ].join('\n'),
+            'RuntimeManager.kt: 已加入 patchRuntimeAuthCookie()'
+          )
+
+          // ── 2) bootstrap()：真改动了就重启一次服务，让新代码生效 ───────────────────────
+          patchOnce(
+            '// DSHM: 上一代 App / 已安装运行时留下的 cookie 属性',
+            '            if (!force && ping(_state.value.port)) {',
+            [
+              '            // DSHM: 上一代 App / 已安装运行时留下的 cookie 属性会让「打开 Harness」第一次',
+              '            // 打开就 401（详见 patchRuntimeAuthCookie 的注释）。先就地修正；确实改动了就重启',
+              '            // 一次服务让新代码生效 —— 只可能发生一次，之后幂等跳过，不会反复重启。',
+              '            if (patchRuntimeAuthCookie()) {',
+              '                appendLog("[DSHM] 已修正运行时 cookie 属性，重启服务使其生效…")',
+              '                restart()',
+              '                return@launch',
+              '            }',
+              '            if (!force && ping(_state.value.port)) {',
+            ].join('\n'),
+            'RuntimeManager.kt: bootstrap 已在复用旧进程前修正 cookie 属性'
+          )
+
+          // ── 3) startServer()：拉起 node 前再确认一次，并把状态写进「查看运行日志」────────
+          patchOnce(
+            '// DSHM: 拉起 node 之前再确认一次 cookie 属性',
+            '        val command = listOf(node.absolutePath, "--expose-internals", entry.absolutePath, "web", "--port", port.toString())',
+            [
+              '        // DSHM: 拉起 node 之前再确认一次 cookie 属性（幂等）。放在 clearLog() 之后，',
+              '        // 所以它写的那行会留在「查看运行日志」里 —— 装的运行时是什么状态一眼可见。',
+              '        patchRuntimeAuthCookie()',
+              '',
+              '        val command = listOf(node.absolutePath, "--expose-internals", entry.absolutePath, "web", "--port", port.toString())',
+            ].join('\n'),
+            'RuntimeManager.kt: startServer 已在启动前确认 cookie 属性'
+          )
+          NODEEOF3
+          D=android/app/src/main/java/com/siliconleap/app/runtime
+          N=$(grep -c "patchRuntimeAuthCookie" "$D/RuntimeManager.kt" || true)
+          if [ "$N" -ne 4 ]; then
+            echo "::error::cookie 补丁出现 $N 处（应恰好 4：1 定义 + 2 bootstrap + 1 startServer）；多出来说明补丁被重复应用"
+            exit 1
+          fi
+          grep -q "private fun patchRuntimeAuthCookie" "$D/RuntimeManager.kt"
+          grep -q 'file.writeText(text.replace("SameSite=Strict", "SameSite=Lax"))' "$D/RuntimeManager.kt"
+          echo "cookie 补丁已就位（$N 处）✓"
       - name: 让容器能看到共享存储（原路径 bind）
         run: |
           node - <<'NODEEOF2'
