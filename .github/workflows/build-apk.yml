@@ -568,6 +568,7 @@ jobs:
 
       - name: Configure release signing
         env:
+          DSHM_KEYSTORE_B64: "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"
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -581,17 +582,21 @@ jobs:
             echo "SILICONLEAP_KEY_PASS=$KEY_PASS" >> "$GITHUB_ENV"
             echo "::notice::release 签名已启用"
           else
-            echo "::warning::未配置 ANDROID_* 签名 Secrets，将回退使用 debug 签名"
+            # 没配 Secrets 时用【工作流里内置的固定签名密钥】。
+            # 为什么不继续用 debug keystore + actions/cache：缓存不可靠 —— 只要没命中，
+            # Gradle 就现场生成一把全新密钥，签出来的 APK 签名和上一版不一致，
+            # 只能卸载重装（564MB 运行时和会话全丢）。内置密钥是确定性的：
+            # 每次构建签名完全相同，以后永远可以直接覆盖安装。
+            # （如果你以后配了 ANDROID_* Secrets，上面的分支优先，会覆盖这里。）
+            echo "$DSHM_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dshm-release.keystore"
+            echo "SILICONLEAP_KEYSTORE_PATH=$RUNNER_TEMP/dshm-release.keystore" >> "$GITHUB_ENV"
+            echo "SILICONLEAP_KEYSTORE_PASS=Dshm-Sideload-2026" >> "$GITHUB_ENV"
+            echo "SILICONLEAP_KEY_ALIAS=dshm" >> "$GITHUB_ENV"
+            echo "SILICONLEAP_KEY_PASS=Dshm-Sideload-2026" >> "$GITHUB_ENV"
+            echo "::notice::使用内置的固定签名密钥（未配置 Secrets）"
           fi
 
-      # 固定签名密钥：不缓存的话，GitHub 每次跑都是全新的 debug keystore，
-      # 签出来的 APK 签名不一致 -> 装不上去（只能卸载重装，运行时/会话全丢）。
-      # 缓存住之后，以后每次构建都能覆盖安装。
-      - name: 固定签名密钥（缓存 debug.keystore）
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: dshm-debug-keystore-v1
+      # 签名统一走上面「Configure release signing」的内置固定密钥，不再依赖 actions/cache。
       - name: Build APK
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon --no-configuration-cache -PruntimeVersion="${DSH_VERSION}"
@@ -603,6 +608,14 @@ jobs:
           unzip -l "$APK" | grep -cE "lib/arm64-v8a/(node|bash|rg|sh)$" || echo "!! 未找到 jniLibs 可执行文件"
           unzip -l "$APK" | grep -E "lib/arm64-v8a/(libc\+\+_shared|libcrypto|libicu)" | head -5
           if unzip -l "$APK" | grep -q "assets/runtime.zip"; then echo "!! APK 仍包含完整 runtime.zip（v2.1 应在线下载）"; fi
+          # 签名证书指纹：每次构建都应该是同一串。变了就说明换了密钥，
+          # 那一版的包必须卸载重装 —— 所以这里显式打出来。
+          APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | head -1 || true)"
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs "$APK" | grep -E "Signer #1 certificate (DN|SHA-256)" || true
+          else
+            echo "· 没找到 apksigner，跳过证书指纹打印"
+          fi
 
       - name: Publish runtime assets (在线下载)
         env:
