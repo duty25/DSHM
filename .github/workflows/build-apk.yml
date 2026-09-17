@@ -141,18 +141,19 @@ jobs:
           node - <<'NODEEOF'
           const fs = require('fs')
 
-          // 这个补丁改两个文件：
-          //   1) RuntimeManager.kt —— 读到 harness 输出的当下就把带 token 的网址存下来
-          //                          （内存 + 一个随服务启动重置的小文件），并提供提取函数
-          //   2) HomeScreen.kt     —— 「打开 Harness」按可靠性依次取用
-          //
-          // 为什么这么做：DSHM 的 LogStore 是「内存环形缓冲(600 行) + 攒够 32 行才落盘」。
-          // 更麻烦的是：App 被后台划掉再打开时，如果旧的 harness 进程还活着，App 会直接
-          // 复用它、不会重启服务 —— 这时内存缓冲是空的、磁盘上可能只有很旧的网址。
-          // 所以在"读到那一行"的当下就存下来最可靠。
+          // token-fix v5：这次一共改两个文件、六处
+          //   1) RuntimeManager.kt
+          //      a) extractHarnessUrl() + harnessUrl() + 两个内部字段
+          //      b) 读到 harness 输出时立刻捕获带 token 的网址（内存 + 小文件）
+          //      c) clearLog()：清掉上次捕获的网址，并写一行版本标记进日志
+          //      d) bootstrap()：端口在监听但我们拿不到网址时（= 上一代 App 进程启动的 harness），
+          //         强制重启一次服务；每个 App 进程最多做一次，避免反复重启
+          //   2) HomeScreen.kt：openHarness() 优先用捕获到的网址，并且【总是弹 Toast 显示
+          //      即将打开的网址】—— 这样万一还有问题，一眼就能看出卡在哪一层
 
           const RM = 'android/app/src/main/java/com/siliconleap/app/runtime/RuntimeManager.kt'
           const HS = 'android/app/src/main/java/com/siliconleap/app/ui/screens/HomeScreen.kt'
+          const MARK = 'token-fix-v5'
 
           function patchFile(file, marker, oldText, newText, okMsg) {
             if (!fs.existsSync(file)) {
@@ -176,7 +177,7 @@ jobs:
           const TOKEN_URL_RE = String.raw`Regex("http://\\S*?\\?token=[A-Za-z0-9_\\-]+={0,2}")`
           const DSH_WEB_RE = String.raw`Regex("dsh web:\\s*(http://\\S+)")`
 
-          // ── 1a) RuntimeManager.kt：提取函数（先剥 ANSI 颜色码，再按两种形态找）────────
+          // ── 1a) 提取函数 + 字段 ────────────────────────────────────────────────────
           patchFile(
             RM,
             'fun extractHarnessUrl',
@@ -197,6 +198,9 @@ jobs:
               '    @Volatile',
               '    private var capturedHarnessUrl: String? = null',
               '',
+              '    /** DSHM: 「拿不到网址就重启一次服务」每个 App 进程只做一次。 */',
+              '    private var urlRecoveryTried = false',
+              '',
               '    /** DSHM: 供「打开 Harness」取用；还没捕获到就返回 null。 */',
               '    fun harnessUrl(): String? = capturedHarnessUrl ?: runCatching {',
               '        val f = File(TermuxEnv.logs(appContext), "harness-url.txt")',
@@ -207,10 +211,10 @@ jobs:
               '',
               '    fun tailLog(lines: Int = 80): String {',
             ].join('\n'),
-            'RuntimeManager.kt: 已加入 extractHarnessUrl() / harnessUrl()'
+            'RuntimeManager.kt: 已加入 extractHarnessUrl() / harnessUrl() / 字段'
           )
 
-          // ── 1b) RuntimeManager.kt：读到那一行时立刻捕获（内存 + 小文件）──────────────
+          // ── 1b) 读到那一行时立刻捕获 ────────────────────────────────────────────────
           patchFile(
             RM,
             'capturedHarnessUrl',
@@ -235,10 +239,10 @@ jobs:
             'RuntimeManager.kt: 已在读取 harness 输出时捕获带 token 的网址'
           )
 
-          // ── 1c) RuntimeManager.kt：每次启动服务时把捕获的网址一起清掉 ────────────────
+          // ── 1c) clearLog：清旧网址 + 写版本标记 ─────────────────────────────────────
           patchFile(
             RM,
-            'capturedHarnessUrl = null',
+            MARK,
             '    private fun clearLog() {\n' +
               '        LogStore.named(TermuxEnv.serverLog(appContext)).clear()',
             [
@@ -248,11 +252,35 @@ jobs:
               '        // 免得「打开 Harness」拿到旧 token 又变成 401。',
               '        capturedHarnessUrl = null',
               '        runCatching { File(TermuxEnv.logs(appContext), "harness-url.txt").delete() }',
+              '        // DSHM: 版本标记 —— 在「查看运行日志」里能直接看到装的是哪一版补丁',
+              '        appendLog("[DSHM] 补丁版本 token-fix-v5 (2026-09-17)")',
             ].join('\n'),
-            'RuntimeManager.kt: 启动服务时清掉上次捕获的网址'
+            'RuntimeManager.kt: clearLog 已清旧网址并写入版本标记'
           )
 
-          // ── 2) HomeScreen.kt：打开时按可靠性依次取网址 ──────────────────────────────
+          // ── 1d) bootstrap：拿不到网址时强制重启一次 ──────────────────────────────────
+          patchFile(
+            RM,
+            '拿不到它的带 token 网址',
+            '            if (!force && ping(_state.value.port)) {\n' +
+              '                _state.update {',
+            [
+              '            if (!force && ping(_state.value.port)) {',
+              '                // DSHM: 端口虽然在监听，但可能是【上一代 App 进程】启动的 harness —— 我们',
+              '                // 没读过它的输出、也拿不到它的带 token 网址，「打开 Harness」必然 401。',
+              '                // 这种情况强制重启一次，换一个我们能抓到网址的进程（每个 App 进程最多一次；',
+              '                // 日志/文件里能取到网址时照旧直接复用，不会打断正在跑的对话）。',
+              '                if (!urlRecoveryTried && harnessUrl() == null && extractHarnessUrl(tailLog(600)) == null) {',
+              '                    urlRecoveryTried = true',
+              '                    restart()',
+              '                    return@launch',
+              '                }',
+              '                _state.update {',
+            ].join('\n'),
+            'RuntimeManager.kt: bootstrap 已加入「拿不到网址就重启一次」'
+          )
+
+          // ── 2) HomeScreen：优先用捕获的网址，并且总是弹 Toast 显示要打开的网址 ───────
           const OLD =
             'private fun openHarness(context: Context, port: Int) {\n' +
             '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:$port/"))'
@@ -282,18 +310,14 @@ jobs:
             '            }',
             '        }.getOrNull()',
             '    }',
-            '    if (printedUrl == null) {',
-            '        android.widget.Toast.makeText(',
-            '            context,',
-            '            "没找到 dsh 打印的网址，用默认地址打开（可能仍会要求鉴权）",',
-            '            android.widget.Toast.LENGTH_LONG,',
-            '        ).show()',
-            '    }',
             '    val url = printedUrl ?: "http://127.0.0.1:$port/"',
+            '    // DSHM: 总是把即将打开的网址显示出来 —— 万一还进不去，一眼就能看出是「没带 token」',
+            '    // 还是「带了但被拒」，不用再猜。',
+            '    android.widget.Toast.makeText(context, "打开：$url", android.widget.Toast.LENGTH_LONG).show()',
             '    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))',
           ].join('\n')
 
-          patchFile(HS, 'RuntimeManager.harnessUrl()', OLD, NEW, 'HomeScreen.kt: 「打开 Harness」优先使用带 token 的网址')
+          patchFile(HS, 'RuntimeManager.harnessUrl()', OLD, NEW, 'HomeScreen.kt: 「打开 Harness」已带网址提示')
           NODEEOF
 
       # ── 让容器里也能看到手机共享存储（原路径）──────────────────────────────
