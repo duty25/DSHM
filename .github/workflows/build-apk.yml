@@ -823,6 +823,80 @@ jobs:
           JSEOF
           echo "--- patch_runtime.js 共 $(wc -l < runtime-builder/patch_runtime.js) 行 ---"
 
+      # ── 修 node-pty 的 Android 交叉编译（2026-10-04）──────────────────────────
+      #   症状：Build Termux runtime 挂在 node-pty 上，报
+      #     src/windowsTerminal.ts(125,35): error TS2591: Cannot find name 'Buffer'.
+      #     src/worker/conoutSocketWorker.ts(5,40): error TS2591: Cannot find name 'worker_threads'.
+      #
+      #   原因（本地用 Node 22.23.3 + npm 10.9.9 逐步复现确认，与本次其它改动无关）：
+      #     node-pty 的 package.json 里有 "prepare": "npm run build"（就是跑 tsc）。
+      #     npm 安装「本地目录依赖」时，**不会安装该目录自身的依赖**，于是
+      #       · prepare 跑 tsc 时找不到 @types/node  → 那些 TS2591；
+      #       · binding.gyp 找不到 node-addon-api（它是 node-pty 的正式依赖，同样没被装上）。
+      #     另外仓库里那句把 tsconfig 的 target 改成 es2022 的 sed 也有问题：
+      #     node-pty 锁的 typescript 是 3.x，根本不认识 es2022（会报 TS6046）。
+      #
+      #   做法：
+      #     ① 删掉 prepare —— 发布包里本来就带着编好的 lib/，不需要再跑 tsc；
+      #     ② 就地补装 node-pty 自己的依赖：--omit=dev 只需装 node-addon-api（约 1 个包），
+      #        --ignore-scripts 防止在本机跑原生构建。
+      #
+      #   ⚠️ 必须插在 `export npm_config_arch=arm64` **之前**：那几行 export 一旦生效，
+      #      npm 会去装 android-arm64 的二进制包，反而装不出东西来。
+      - name: 修 node-pty 的 Android 交叉编译
+        run: |
+          node - <<'NODEEOF5'
+          const fs = require('fs')
+          const F = 'runtime-builder/build_node_pty.sh'
+          const MARK = 'DSHM: node-pty 依赖修正'
+          if (!fs.existsSync(F)) {
+            console.log('::error::找不到 ' + F + '（node-pty 修正没打上）')
+            process.exit(1)
+          }
+          const src = fs.readFileSync(F, 'utf8')
+          if (src.includes(MARK)) {
+            console.log('build_node_pty.sh: 已修过，跳过')
+            process.exit(0)
+          }
+          const ANCHOR = 'echo "==> 交叉编译"'
+          const hits = src.split(ANCHOR).length - 1
+          if (hits !== 1) {
+            console.log('::error::锚点在 ' + F + ' 里出现 ' + hits + ' 次（应为 1 次）—— node-pty 修正没打上')
+            process.exit(1)
+          }
+          const INS = [
+            '# DSHM: node-pty 依赖修正（必须在下面那几行 export 之前）',
+            'echo "==> 修正 node-pty 的依赖（npm 不会为本地目录依赖安装它们）"',
+            'rm -rf "$WORK/pty/node_modules"',
+            '( cd "$WORK/pty" && npm pkg delete scripts.prepare && npm install --ignore-scripts --omit=dev --no-audit --no-fund )',
+            'if [ ! -d "$WORK/pty/node_modules/node-addon-api" ]; then',
+            '  echo "!! node-pty 的依赖没装上（缺 node-addon-api），后面的原生构建必然失败" >&2',
+            '  exit 3',
+            'fi',
+            'if grep -q "\\"prepare\\"" "$WORK/pty/package.json"; then',
+            '  echo "!! node-pty 的 prepare 脚本没删掉，tsc 会以缺 @types/node 的方式失败" >&2',
+            '  exit 4',
+            'fi',
+            '',
+          ].join('\n')
+          fs.writeFileSync(F, src.replace(ANCHOR, INS + ANCHOR))
+          console.log('build_node_pty.sh: 已加入依赖修正')
+          NODEEOF5
+          echo "--- 校验 ---"
+          F=runtime-builder/build_node_pty.sh
+          grep -qF 'DSHM: node-pty 依赖修正' "$F" || { echo "::error::node-pty 依赖修正没打上"; exit 1; }
+          grep -qF 'npm pkg delete scripts.prepare' "$F" || { echo "::error::缺少 prepare 删除"; exit 1; }
+          grep -qF 'npm install --ignore-scripts --omit=dev' "$F" || { echo "::error::缺少依赖补装"; exit 1; }
+          bash -n "$F" || { echo "::error::build_node_pty.sh 语法被改坏了"; exit 1; }
+          L1=$(grep -n 'DSHM: node-pty 依赖修正' "$F" | head -1 | cut -d: -f1)
+          L2=$(grep -n 'export npm_config_arch=arm64' "$F" | head -1 | cut -d: -f1)
+          echo "修正在第 $L1 行，export 在第 $L2 行"
+          if [ "$L1" -ge "$L2" ]; then
+            echo "::error::顺序不对：修正必须在 export npm_config_arch 之前"
+            exit 1
+          fi
+          echo "node-pty 依赖修正已就位 ✓"
+
       - name: Build Termux runtime
         env:
           TERMUX_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main
