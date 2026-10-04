@@ -511,6 +511,141 @@ jobs:
           console.log('TermuxEnv.kt: 已把 /storage/emulated/0 以原路径 bind 进容器')
           NODEEOF2
 
+      # ── DSHM: 启动前维护钩子 ─────────────────────────────────────────────────
+      #   起因：dsh 因为 profile 配置出错起不来时，DSH_HOME 在应用私有目录里，
+      #   Termux / Shizuku / adb run-as 全都够不着（实测 run-as 报 not debuggable），
+      #   于是没有任何入口能读到那份坏掉的配置。
+      #
+      #   这个钩子用应用自己的身份（本进程就是那些文件的属主），在拉起 node 之前：
+      #     1) 把 profiles/web 的关键配置写进运行日志；
+      #     2) 若工作区里存在 dshm-fix.sh，就带着运行时环境执行它，并把输出记进日志。
+      #
+      #   装了这一版之后，「设置 → 环境 → 查看运行日志」就成为一条永远可用的维护通道：
+      #   以后任何插件把启动搞挂，都能先看日志、再丢一个修复脚本进工作区重启解决。
+      - name: 加入启动前维护钩子（dsh 起不来时也能读 profile）
+        run: |
+          node - <<'NODEEOF4'
+          const fs = require('fs')
+
+          const RM = 'android/app/src/main/java/com/siliconleap/app/runtime/RuntimeManager.kt'
+          const MARK = 'DSHM 维护钩子'
+
+          function patchOnce(oldText, newText, okMsg) {
+            if (!fs.existsSync(RM)) {
+              console.log('::error::找不到 ' + RM + '（维护钩子没打上）')
+              process.exit(1)
+            }
+            const src = fs.readFileSync(RM, 'utf8')
+            if (src.includes(MARK)) {
+              console.log('RuntimeManager.kt: 维护钩子已存在，跳过')
+              return
+            }
+            const hits = src.split(oldText).length - 1
+            if (hits !== 1) {
+              console.log('::error::锚点在 ' + RM + ' 里出现 ' + hits + ' 次（应为 1 次）—— 维护钩子没打上')
+              process.exit(1)
+            }
+            fs.writeFileSync(RM, src.replace(oldText, newText))
+            console.log(okMsg)
+          }
+
+          // ── 1) 在 preflight 之前调用 ─────────────────────────────────────────────
+          const CALL_OLD = '        val diag = preflight(node, entry)'
+          const CALL_NEW = [
+            '        // DSHM: 维护钩子（见 maintenanceHook 的注释）。放在 preflight 之前，',
+            '        // 因此即使 preflight 直接判失败返回，日志里也已经有了 profile 配置。',
+            '        maintenanceHook()',
+            CALL_OLD,
+          ].join('\n')
+
+          // ── 2) 两个函数本体，插在 preflight 定义之前 ──────────────────────────────
+          const FUNC_OLD = '    private fun preflight(node: File, entry: File): String? {'
+          const FUNC_NEW = [
+            '    /**',
+            '     * DSHM: 启动前维护钩子。',
+            '     *',
+            '     * dsh 因为 profile 配置问题起不来时，应用仍然会走到这里 —— 这是唯一一条不需要',
+            '     * 启动服务、也不需要 root 就能读到 DSH_HOME 的通路（本进程就是那些文件的属主）。',
+            '     *',
+            '     * 每次启动服务都会执行，做两件事：',
+            '     *   1) 把 profiles/web 的关键配置打进运行日志，便于定位启动失败的原因；',
+            '     *   2) 若工作区里存在 dshm-fix.sh，则以本应用身份、带运行时环境执行它并记录输出。',
+            '     */',
+            '    private fun maintenanceHook() {',
+            '        appendLog("===== DSHM 维护钩子 =====")',
+            '        val home = TermuxEnv.dshHome(appContext)',
+            '        val profile = File(home, "profiles/web")',
+            '        appendLog("dshHome=" + home.absolutePath)',
+            '        appendLog("profile=" + profile.absolutePath + " isDir=" + profile.isDirectory)',
+            '        val manifest = File(profile, "package.json")',
+            '        appendLog("--- profiles/web/package.json ---")',
+            '        if (manifest.isFile) {',
+            '            val text = runCatching { manifest.readText() }.getOrNull()',
+            '            for (line in (text ?: "(read failed)").take(6000).lineSequence()) appendLog(line)',
+            '        } else {',
+            '            appendLog("(不存在)")',
+            '        }',
+            '        val userPatch = File(profile, "cordis.patch.yml")',
+            '        if (userPatch.isFile) {',
+            '            appendLog("--- profiles/web/cordis.patch.yml ---")',
+            '            val text = runCatching { userPatch.readText() }.getOrNull()',
+            '            for (line in (text ?: "(read failed)").take(4000).lineSequence()) appendLog(line)',
+            '        }',
+            '        val nm = File(profile, "node_modules")',
+            '        if (nm.isDirectory) {',
+            '            appendLog("--- profiles/web/node_modules ---")',
+            '            appendLog(nm.list()?.sorted()?.joinToString(", ") ?: "(list failed)")',
+            '        }',
+            '        val candidates = listOf(',
+            '            File(TermuxEnv.workspace(appContext), "dshm-fix.sh"),',
+            '            File("/storage/emulated/0/DSHM/dshm-fix.sh"),',
+            '        )',
+            '        val script = candidates.firstOrNull { it.isFile && it.canRead() }',
+            '        if (script == null) {',
+            '            appendLog("--- 未找到 dshm-fix.sh ---")',
+            '            for (c in candidates) appendLog("   checked: " + c.absolutePath)',
+            '        } else {',
+            '            appendLog("--- run " + script.absolutePath + " ---")',
+            '            for (line in runMaintenanceScript(script).lineSequence()) appendLog(line)',
+            '        }',
+            '    }',
+            '',
+            '    /** DSHM: 以本应用身份执行维护脚本（只有 nativeLibraryDir 里的可执行文件允许 exec）。 */',
+            '    private fun runMaintenanceScript(script: File): String {',
+            '        val bash = File(TermuxEnv.nativeLibDir(appContext), "libbash.so")',
+            '        if (!bash.isFile) return "(libbash.so not found)"',
+            '        return runCatching {',
+            '            val pb = ProcessBuilder(bash.absolutePath, script.absolutePath)',
+            '            pb.environment().putAll(TermuxEnv.serverEnv(appContext))',
+            '            pb.directory(TermuxEnv.workspace(appContext))',
+            '            pb.redirectErrorStream(true)',
+            '            val p = pb.start()',
+            '            val out = StringBuilder()',
+            '            val reader = Thread {',
+            '                runCatching { p.inputStream.bufferedReader().forEachLine { out.appendLine(it) } }',
+            '            }',
+            '            reader.isDaemon = true',
+            '            reader.start()',
+            '            reader.join(120000L)',
+            '            val code = runCatching { p.exitValue() }.getOrDefault(-1)',
+            '            runCatching { p.destroyForcibly() }',
+            '            out.append("(exit=").append(code).append(")")',
+            '            out.toString()',
+            '        }.getOrElse { "(script failed: " + (it.message ?: it.javaClass.simpleName) + ")" }',
+            '    }',
+            '',
+            FUNC_OLD,
+          ].join('\n')
+
+          patchOnce(CALL_OLD, CALL_NEW, 'RuntimeManager.kt: 已在 preflight 前调用 maintenanceHook()')
+          patchOnce(FUNC_OLD, FUNC_NEW, 'RuntimeManager.kt: 已加入 maintenanceHook() / runMaintenanceScript()')
+          NODEEOF4
+          D=android/app/src/main/java/com/siliconleap/app/runtime
+          for s in 'maintenanceHook()' 'private fun maintenanceHook()' 'private fun runMaintenanceScript(' 'DSHM 维护钩子'; do
+            grep -qF "$s" "$D/RuntimeManager.kt" || { echo "::error::维护钩子校验失败：找不到 $s"; exit 1; }
+          done
+          echo "维护钩子已就位 ✓"
+
       # ── 给新版 dsh 补上原补丁没覆盖的地方 ─────────────────────────────────────
       #   runtime-builder/patch_runtime.js 是按 dsh 0.1.0-rc.6 写的；0.1.1 起有 4 处对不上
       #   （tool-fs-search 的 rg 路径、apiproxy 包被删、session-persistence 的 import、
