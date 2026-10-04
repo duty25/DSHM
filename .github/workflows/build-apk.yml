@@ -897,6 +897,179 @@ jobs:
           fi
           echo "node-pty 依赖修正已就位 ✓"
 
+      # ── 修「依赖被嵌套」和「libtalloc 版本写死」（2026-10-04）─────────────────
+      #   症状一：运行时补丁刷出一屏
+      #     [warn] fs-local ... : 文件不存在，跳过
+      #   原因（本机完整复现确认）：npm 不保证依赖平铺。实测装 @deepseek-ai/dsh@0.1.5-rc.2 时，
+      #   它的传递依赖被解析成 0.1.5-rc.3 并**嵌进 dsh 自己的 node_modules**：
+      #     lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js
+      #   而 patch_runtime.js 把路径写死成顶层 lib/node_modules/@deepseek-ai/<pkg>/...，
+      #   于是 10 个目标全部「文件不存在」→ 补丁一个没打上 → 后面「校验 Android 补丁」必红。
+      #   做法：给 patch_runtime.js 加一个 resolveRel()，先按原路径找，找不到就在整棵
+      #   node_modules 里按后缀匹配；patchFile / patchDirFiles / writeFile 三处改用它。
+      #   （后面追加的那些补丁调用的是同一批函数，自动受益。）
+      #
+      #   症状二：
+      #     cp: cannot stat '.../lib/libtalloc.so.2.4.3': No such file or directory
+      #   原因：Termux 仓库现在给的是 libtalloc **2.5.0**，而两个脚本把 2.4.3 写死了。
+      #   做法：改成按 libtalloc.so.2.* 通配取最新，并保留 libtalloc.so.2 软链
+      #   （TermuxEnv.kt 只认 lib/libtalloc.so.2 这个名字）。
+      - name: 修依赖嵌套路径 + libtalloc 版本写死
+        run: |
+          node - <<'NODEEOF6'
+          const fs = require('fs')
+
+          function patchText(file, oldText, newText, label, marker, expected) {
+            const want = expected || 1
+            if (!fs.existsSync(file)) {
+              console.log('::error::找不到 ' + file + '（' + label + ' 没打上）')
+              process.exit(1)
+            }
+            const src = fs.readFileSync(file, 'utf8')
+            if (src.includes(marker)) {
+              console.log(file + ': ' + label + ' 已存在，跳过')
+              return
+            }
+            const hits = src.split(oldText).length - 1
+            if (hits !== want) {
+              console.log('::error::' + file + ' 里锚点出现 ' + hits + ' 次（应为 ' + want + ' 次）—— ' + label + ' 没打上')
+              process.exit(1)
+            }
+            fs.writeFileSync(file, src.split(oldText).join(newText))
+            console.log(file + ': ' + label + ' 已注入')
+          }
+
+          // ── 1) patch_runtime.js：加 resolveRel() 并让三个辅助函数用它 ────────────────
+          const PR = 'runtime-builder/patch_runtime.js'
+          const HELPER = [
+            '/**',
+            ' * DSHM: 把一个相对路径解析成真实文件位置。',
+            ' *',
+            ' * npm 不保证依赖平铺：实测 @deepseek-ai/dsh@0.1.5-rc.2 的传递依赖（解析为 0.1.5-rc.3）',
+            ' * 会嵌在 lib/node_modules/@deepseek-ai/dsh/node_modules/ 下面。所有写死顶层路径的补丁',
+            ' * 都会因此「文件不存在，跳过」。这里先按原路径找，找不到再在整棵 node_modules 里按后缀匹配。',
+            ' */',
+            'function resolveRel(rel, needFile) {',
+            '  const direct = path.join(prefix, rel);',
+            '  const directOk = needFile ? fs.existsSync(direct) : fs.existsSync(path.dirname(direct));',
+            '  if (directOk) return direct;',
+            '  // 只拿 lib/node_modules/ 之后的那一段去匹配：嵌套时前缀是 …/dsh/node_modules/，',
+            '  // 不是 …/lib/node_modules/，按整条路径比会永远匹配不上。',
+            '  const NM = \'lib/node_modules/\';',
+            '  const rest = rel.indexOf(NM) === 0 ? rel.slice(NM.length) : rel;',
+            '  const root = path.join(prefix, \'lib/node_modules\');',
+            '  const dirPart = path.dirname(rest);',
+            '  const suffix = \'node_modules/\' + dirPart;',
+            '  let hit = null;',
+            '  const walk = (dir, depth) => {',
+            '    if (hit || depth > 10) return;',
+            '    let entries;',
+            '    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }',
+            '    for (const e of entries) {',
+            '      if (!e.isDirectory() && !e.isSymbolicLink()) continue;',
+            '      const full = path.join(dir, e.name);',
+            '      if (full.endsWith(suffix) && fs.existsSync(full)) { hit = full; return; }',
+            '      walk(full, depth + 1);',
+            '      if (hit) return;',
+            '    }',
+            '  };',
+            '  walk(root, 0);',
+            '  if (hit) {',
+            '    const real = path.join(hit, path.basename(rest));',
+            '    console.log(\'[info] 依赖被嵌套，改用实际位置: \' + rel + \' -> \' + path.relative(prefix, real));',
+            '    return real;',
+            '  }',
+            '  return direct;',
+            '}',
+            '',
+            'function patchFile(rel, transform, label) {',
+          ].join('\n')
+          patchText(PR, 'function patchFile(rel, transform, label) {', HELPER, 'resolveRel 辅助函数', 'function resolveRel(rel, needFile)')
+          patchText(
+            PR,
+            'const target = path.join(prefix, rel);',
+            'const target = resolveRel(rel, true);',
+            'patchFile/writeFile 改用 resolveRel',
+            'const target = resolveRel(rel, true);',
+            2,
+          )
+          patchText(
+            PR,
+            'const dir = path.join(prefix, relDir);',
+            'const dir = resolveRel(relDir, false);',
+            'patchDirFiles 改用 resolveRel',
+            'const dir = resolveRel(relDir, false);',
+          )
+
+          // ── 2) fetch_proot_native.sh：libtalloc 版本不写死 ──────────────────────────
+          patchText(
+            'runtime-builder/fetch_proot_native.sh',
+            '#   libproot.so / libtermux-chroot.so / libtalloc.so.2.4.3(+软链) / libandroid-shmem.so',
+            '#   libproot.so / libtermux-chroot.so / libtalloc.so.2.*(+软链) / libandroid-shmem.so',
+            '文件头注释同步',
+            'libtalloc.so.2.*(+软链)',
+          )
+          patchText(
+            'runtime-builder/fetch_proot_native.sh',
+            'cp "$TX/lib/libtalloc.so.2.4.3" "$NATIVE/libtalloc.so.2.4.3"\nln -sf "libtalloc.so.2.4.3" "$NATIVE/libtalloc.so.2"',
+            [
+              '# DSHM: Termux 仓库的 libtalloc 版本会变（2026-10 起是 2.5.0），不能写死版本号',
+              'TALLOC_REAL="$(ls "$TX/lib/"libtalloc.so.2.* 2>/dev/null | sort -V | tail -1)"',
+              'if [ -z "$TALLOC_REAL" ]; then',
+              '  echo "::error::libtalloc.deb 里没找到 libtalloc.so.2.*（$TX/lib）"',
+              '  ls -la "$TX/lib/" 2>/dev/null | head -20',
+              '  exit 1',
+              'fi',
+              'TALLOC_NAME="$(basename "$TALLOC_REAL")"',
+              'cp "$TALLOC_REAL" "$NATIVE/$TALLOC_NAME"',
+              'ln -sf "$TALLOC_NAME" "$NATIVE/libtalloc.so.2"',
+              'echo "    libtalloc: $TALLOC_NAME"',
+            ].join('\n'),
+            'libtalloc 版本动态化',
+            'DSHM: Termux 仓库的 libtalloc 版本会变',
+          )
+
+          // ── 3) build_runtime.sh：同样处理 ──────────────────────────────────────────
+          patchText(
+            'runtime-builder/build_runtime.sh',
+            'cp "$WORK/proot-stage/data/data/com.termux/files/usr/lib/libtalloc.so.2.4.3" "$PREFIX/lib/libtalloc.so.2.4.3"\nln -sf "libtalloc.so.2.4.3" "$PREFIX/lib/libtalloc.so.2"',
+            [
+              '# DSHM: 同上，版本号不能写死（仓库现在是 2.5.0）',
+              'TALLOC_LIBDIR="$WORK/proot-stage/data/data/com.termux/files/usr/lib"',
+              'TALLOC_REAL="$(ls "$TALLOC_LIBDIR/"libtalloc.so.2.* 2>/dev/null | sort -V | tail -1)"',
+              'if [ -z "$TALLOC_REAL" ]; then',
+              '  echo "::error::fetch_proot_native 没产出 libtalloc.so.2.*（$TALLOC_LIBDIR）"',
+              '  ls -la "$TALLOC_LIBDIR/" 2>/dev/null | head -20',
+              '  exit 1',
+              'fi',
+              'TALLOC_NAME="$(basename "$TALLOC_REAL")"',
+              'cp "$TALLOC_REAL" "$PREFIX/lib/$TALLOC_NAME"',
+              'ln -sf "$TALLOC_NAME" "$PREFIX/lib/libtalloc.so.2"',
+              'echo "    libtalloc: $TALLOC_NAME -> $PREFIX/lib/libtalloc.so.2"',
+            ].join('\n'),
+            'libtalloc 版本动态化',
+            'DSHM: 同上，版本号不能写死',
+          )
+          NODEEOF6
+          echo "--- 校验 ---"
+          grep -qF 'function resolveRel(rel, needFile)' runtime-builder/patch_runtime.js || { echo "::error::resolveRel 没注入"; exit 1; }
+          [ "$(grep -c 'resolveRel(rel, true)' runtime-builder/patch_runtime.js)" = "2" ] || { echo "::error::resolveRel 应用点数量不对"; exit 1; }
+          grep -qF 'resolveRel(relDir, false)' runtime-builder/patch_runtime.js || { echo "::error::patchDirFiles 没改"; exit 1; }
+          # 只看非注释行（文件头注释里可能合法地提到旧名字）
+          for f in runtime-builder/fetch_proot_native.sh runtime-builder/build_runtime.sh; do
+            if grep -v '^[[:space:]]*#' "$f" | grep -qF 'libtalloc.so.2.4.3'; then
+              echo "::error::$f 里仍有写死的 libtalloc.so.2.4.3"
+              grep -n 'libtalloc.so.2.4.3' "$f" || true
+              exit 1
+            fi
+          done
+          grep -qF 'libtalloc.so.2.*' runtime-builder/fetch_proot_native.sh || { echo "::error::fetch_proot_native.sh 没改成通配"; exit 1; }
+          grep -qF 'libtalloc.so.2.*' runtime-builder/build_runtime.sh || { echo "::error::build_runtime.sh 没改成通配"; exit 1; }
+          node --check runtime-builder/patch_runtime.js || { echo "::error::patch_runtime.js 语法被改坏"; exit 1; }
+          bash -n runtime-builder/fetch_proot_native.sh || { echo "::error::fetch_proot_native.sh 语法被改坏"; exit 1; }
+          bash -n runtime-builder/build_runtime.sh || { echo "::error::build_runtime.sh 语法被改坏"; exit 1; }
+          echo "依赖嵌套路径 + libtalloc 修正已就位 ✓"
+
       - name: Build Termux runtime
         env:
           TERMUX_MIRROR: https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main
@@ -921,9 +1094,22 @@ jobs:
           echo "校验目录：$NM"
           fail=0
 
+          # DSHM: npm 会把 dsh 的依赖嵌到 lib/node_modules/@deepseek-ai/dsh/node_modules/ 下，
+          # 所以不能只看顶层路径：找不到就按 */node_modules/<rel> 在整棵树里找。
+          # 先一次性列出整棵树的文件建索引：避免每次检查都重新遍历；也避开
+          # set -o pipefail 下 find|head 因 SIGPIPE 返回非零、被 set -e 打死。
+          NM_INDEX="$(mktemp)"
+          find "$NM" -type f 2>/dev/null > "$NM_INDEX" || true
+          echo "索引条目：$(wc -l < "$NM_INDEX")"
+          resolve_nm() { # <相对路径（$NM 之下）>
+            if [ -f "$NM/$1" ]; then printf '%s' "$NM/$1"; return 0; fi
+            grep -m1 -E -- "/node_modules/$1\$" "$NM_INDEX" || true
+          }
+          
           check() { # <相对路径> <必须出现的字面量> <说明>
-            local f="$NM/$1"
-            if [ ! -f "$f" ]; then
+            local f
+            f="$(resolve_nm "$1")"
+            if [ -z "$f" ] || [ ! -f "$f" ]; then
               echo "::error::补丁校验失败：文件不存在 $1 —— 这个 dsh 版本里该包被删/改名了（$3）"
               fail=1
               return
@@ -935,8 +1121,9 @@ jobs:
           }
 
           absent() { # <相对路径> <不该出现的字面量> <说明>
-            local f="$NM/$1"
-            [ -f "$f" ] || return 0
+            local f
+            f="$(resolve_nm "$1")"
+            [ -n "$f" ] && [ -f "$f" ] || return 0
             if grep -qF -- "$2" "$f"; then
               echo "::error::补丁校验失败：$3 —— $1 里仍存在 \"$2\""
               fail=1
@@ -947,8 +1134,9 @@ jobs:
             # 两种方式都试：不同 Node 版本判定 ESM 的方式不一样（文件参数依赖 package.json
             # 的 type 字段，stdin 形式靠 --input-type=module 强制）。只要一种通过就不算错，
             # 避免因 Node 版本差异误报。
-            local f="$NM/$1"
-            [ -f "$f" ] || return 0
+            local f
+            f="$(resolve_nm "$1")"
+            [ -n "$f" ] && [ -f "$f" ] || return 0
             if node --check "$f" >/tmp/syntax.err 2>&1; then return 0; fi
             if node --input-type=module --check < "$f" >/tmp/syntax.err 2>&1; then return 0; fi
             echo "::error::语法检查失败：$1（这个文件加载会直接抛错）"
@@ -1049,11 +1237,15 @@ jobs:
           #    相关的 sharp，容易跟补丁无关地失败，所以不放进这个列表。────────────────
           LOAD_MODULES="dsh-subprocess-local dsh-tool-fs-search dsh-sandbox-local dsh-fs-local dsh-bash-local dsh-bash-sandbox dsh-terminal-bash dsh-session-persistence-jsonl dsh-attachment-local"
           if NM="$NM" LOAD_MODULES="$LOAD_MODULES" node --input-type=module <<'LOADEOF'
-          const base = process.env.NM + '/@deepseek-ai/'
+          import { createRequire } from 'node:module'
+          import { pathToFileURL } from 'node:url'
+          // DSHM: 依赖可能被嵌在 dsh 自己的 node_modules 下，用 Node 自己的解析来定位
+          const req = createRequire(process.env.NM + '/@deepseek-ai/dsh/lib/bin.js')
           let bad = 0
           for (const m of process.env.LOAD_MODULES.split(' ')) {
             try {
-              await import(base + m + '/lib/index.js')
+              const p = req.resolve('@deepseek-ai/' + m)
+              await import(pathToFileURL(p).href)
               console.log(`· 模块加载 OK: ${m}`)
             } catch (e) {
               console.log(`::error::模块加载失败 ${m}: ${e && e.message ? e.message : e}`)
