@@ -1,7 +1,7 @@
 #!/bin/bash
 # 从 Termux 仓库下载 proot 及其依赖，解包后放入指定 native 目录。
 # 输出（以 .so 结尾以便打进 jniLibs）：
-#   libproot.so / libtermux-chroot.so / libtalloc.so.2.4.3(+软链) / libandroid-shmem.so
+#   libproot.so / libtermux-chroot.so / libtalloc.so.2.*(+软链) / libandroid-shmem.so
 set -euo pipefail
 
 WORK="${1:?WORK 目录}"
@@ -39,8 +39,17 @@ done
 TX="$STAGE/data/data/com.termux/files/usr"
 cp "$TX/bin/proot" "$NATIVE/libproot.so"
 cp "$TX/bin/termux-chroot" "$NATIVE/libtermux-chroot.so"
-cp "$TX/lib/libtalloc.so.2.4.3" "$NATIVE/libtalloc.so.2.4.3"
-ln -sf "libtalloc.so.2.4.3" "$NATIVE/libtalloc.so.2"
+# DSHM: Termux 仓库的 libtalloc 版本会变（2026-10 起是 2.5.0），不能写死版本号
+TALLOC_REAL="$(ls "$TX/lib/"libtalloc.so.2.* 2>/dev/null | sort -V | tail -1)"
+if [ -z "$TALLOC_REAL" ]; then
+  echo "::error::libtalloc.deb 里没找到 libtalloc.so.2.*（$TX/lib）"
+  ls -la "$TX/lib/" 2>/dev/null | head -20
+  exit 1
+fi
+TALLOC_NAME="$(basename "$TALLOC_REAL")"
+cp "$TALLOC_REAL" "$NATIVE/$TALLOC_NAME"
+ln -sf "$TALLOC_NAME" "$NATIVE/libtalloc.so.2"
+echo "    libtalloc: $TALLOC_NAME"
 cp "$TX/lib/libandroid-shmem.so" "$NATIVE/libandroid-shmem.so"
 # proot loader（PROOT_UNBUNDLE_LOADER 安装于 $PREFIX/libexec/proot/loader）。
 # Android 上 app 数据目录 noexec，loader 必须放 nativeLibraryDir 并以

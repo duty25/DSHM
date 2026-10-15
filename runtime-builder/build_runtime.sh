@@ -111,8 +111,18 @@ bash "$SCRIPT_DIR/fetch_proot_native.sh" "$WORK" "$TERMUX_MIRROR" "$NATIVE" "$AR
 # 必须随 runtime 进入 $PREFIX/lib（node 服务注入 LD_LIBRARY_PATH=$nativeLib:$PREFIX/lib，
 # proot 按 DT_NEEDED libtalloc.so.2 加载）。
 mkdir -p "$PREFIX/lib"
-cp "$WORK/proot-stage/data/data/com.termux/files/usr/lib/libtalloc.so.2.4.3" "$PREFIX/lib/libtalloc.so.2.4.3"
-ln -sf "libtalloc.so.2.4.3" "$PREFIX/lib/libtalloc.so.2"
+# DSHM: 同上，版本号不能写死（仓库现在是 2.5.0）
+TALLOC_LIBDIR="$WORK/proot-stage/data/data/com.termux/files/usr/lib"
+TALLOC_REAL="$(ls "$TALLOC_LIBDIR/"libtalloc.so.2.* 2>/dev/null | sort -V | tail -1)"
+if [ -z "$TALLOC_REAL" ]; then
+  echo "::error::fetch_proot_native 没产出 libtalloc.so.2.*（$TALLOC_LIBDIR）"
+  ls -la "$TALLOC_LIBDIR/" 2>/dev/null | head -20
+  exit 1
+fi
+TALLOC_NAME="$(basename "$TALLOC_REAL")"
+cp "$TALLOC_REAL" "$PREFIX/lib/$TALLOC_NAME"
+ln -sf "$TALLOC_NAME" "$PREFIX/lib/libtalloc.so.2"
+echo "    libtalloc: $TALLOC_NAME -> $PREFIX/lib/libtalloc.so.2"
 
 echo "==> [7/7] 生成 runtime.zip"
 STAGE="$WORK/stage"
