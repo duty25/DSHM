@@ -110,10 +110,11 @@ jobs:
           echo "fork = $R"
           sed -i 's|val port: Int = 3080|val port: Int = 3082|' "$D/RuntimeManager.kt"
           sed -i "s|RochelimitDawn/DSHM|${R}|g; s|你的GitHub用户名/DSHM|${R}|g" \
-            "$D/RuntimeManager.kt" "$D/SourceManager.kt" "$D/SubsystemManager.kt"
+            "$D/RuntimeManager.kt" "$D/SourceManager.kt" "$D/SubsystemManager.kt" "$D/UpdateManager.kt"
           echo "--- 校验：应该看到 3082 和你的 fork 名字 ---"
           grep -n "val port: Int" "$D/RuntimeManager.kt"
           grep -rn "releases/download" "$D" | grep -v AddonManager
+          grep -n "private const val REPO" "$D/UpdateManager.kt"
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
