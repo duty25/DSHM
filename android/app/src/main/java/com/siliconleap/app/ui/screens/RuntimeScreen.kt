@@ -327,7 +327,7 @@ private fun SubsystemCard(isActive: Boolean) {
     val currentActive by rememberUpdatedState(isActive)
     val subSize by produceState(0L) {
         while (true) {
-            if (currentActive) value = SubsystemManager.subsystemSize(context)
+            if (currentActive) value = withContext(Dispatchers.IO) { SubsystemManager.subsystemSize(context) }
             delay(15000)
         }
     }
@@ -563,7 +563,7 @@ private fun SubsystemLogDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     var refreshKey by remember { mutableStateOf(0) }
     val log by produceState("", refreshKey) {
-        value = SubsystemManager.tailLog(context, 200)
+        value = withContext(Dispatchers.IO) { SubsystemManager.tailLog(context, 200) }
     }
     WindowDialog(
         show = true,
@@ -833,7 +833,7 @@ private fun LogDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     var refreshKey by remember { mutableStateOf(0) }
     val log by produceState("", refreshKey) {
-        value = RuntimeManager.tailLog(400)
+        value = withContext(Dispatchers.IO) { RuntimeManager.tailLog(400) }
     }
     WindowDialog(
         show = true,
