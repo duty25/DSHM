@@ -1,6 +1,8 @@
 package com.siliconleap.app.runtime
 
 import android.content.Context
+import android.os.Looper
+import android.os.SystemClock
 import android.os.StatFs
 import com.siliconleap.app.BuildConfig
 import java.io.BufferedInputStream
@@ -14,7 +16,9 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -112,7 +116,20 @@ object RuntimeManager {
     }
 
     private lateinit var appContext: Context
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 后台流程里未处理的异常：记录并转为 ERROR 状态。没有这个处理器时，异常会交给线程的
+     * 默认处理器，直接让整个 App 进程崩溃（node 服务作为子进程也会一起结束）。
+     */
+    private val scopeErrors = CoroutineExceptionHandler { _, error ->
+        CrashRecorder.recordHandled("RuntimeManager 后台任务", error)
+        runCatching { appendLog("! 后台任务异常：${error.javaClass.simpleName}: ${error.message ?: ""}") }
+        _state.update {
+            if (it.phase == ServerPhase.RUNNING) it
+            else it.copy(phase = ServerPhase.ERROR, message = "内部错误：${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + scopeErrors)
 
     private val _state = MutableStateFlow(RuntimeState())
     val state: StateFlow<RuntimeState> = _state.asStateFlow()
@@ -131,8 +148,35 @@ object RuntimeManager {
     private val _runtimeUpdateAvailable = MutableStateFlow(false)
     val runtimeUpdateAvailable: StateFlow<Boolean> = _runtimeUpdateAvailable.asStateFlow()
 
+    @Volatile
     private var serverProcess: Process? = null
     private var startedAt: Long = 0L
+
+    /** 本应用拉起的 node 进程 PID（启动时解析一次，避免轮询时反复反射 / 扫描 /proc）。 */
+    @Volatile
+    private var serverPid: Long? = null
+
+    /** 复用的、非本进程引用的服务进程 PID（按端口反查得到，结果缓存）。 */
+    @Volatile
+    private var orphanPid: Long? = null
+    private var orphanScanAt = 0L
+
+    /** 正在执行的 bootstrap 流程；用于识别「STARTING 但没有任何流程在推进」的残留状态。 */
+    @Volatile
+    private var bootJob: Job? = null
+
+    /** 后台执行中的停止服务任务；bootstrap 会先等它结束，避免新旧进程交错。 */
+    @Volatile
+    private var stopJob: Job? = null
+
+    /** 主动停止的进程：它退出不算意外，不触发记录与自动重启。 */
+    @Volatile
+    private var expectedExit: Process? = null
+
+    /** 自动重启的时间戳（滑动窗口限流，防止配置错误导致无限重启）。 */
+    private val autoRestartTimes = ArrayDeque<Long>()
+    private const val AUTO_RESTART_WINDOW_MS = 10 * 60_000L
+    private const val AUTO_RESTART_MAX = 3
 
     /** 下载源列表（可由设置页调整）。 */
     var metaUrl: String = DEFAULT_META_URL
@@ -164,8 +208,28 @@ object RuntimeManager {
         if (serverProcess?.isAlive == true) return System.currentTimeMillis() - startedAt
         // 进程引用丢失（应用重启后旧 node 进程仍存活）时按进程启动时间反查，
         // 避免"运行时长 0 秒"直到下次重启才恢复
-        val pid = processPid(serverProcess)
-        return pid?.let { processUptimeMillis(it) } ?: 0L
+        val pid = orphanPid ?: return 0L
+        return processUptimeMillis(pid) ?: 0L
+    }
+
+    /**
+     * 当前服务进程 PID。优先用启动时缓存的值；引用丢失时才按端口反查，且最多每 30 秒一次
+     * （反查要遍历所有进程的 fd，开销大）。scan=false 时只读缓存，可在主线程调用。
+     */
+    private fun currentPid(scan: Boolean): Long? {
+        val proc = serverProcess
+        if (proc != null) return if (proc.isAlive) serverPid else null
+        val cached = orphanPid
+        if (cached != null) {
+            if (File("/proc/$cached").exists()) return cached
+            orphanPid = null
+        }
+        if (!scan) return null
+        val now = SystemClock.elapsedRealtime()
+        if (orphanScanAt != 0L && now - orphanScanAt < 30_000L) return null
+        orphanScanAt = now
+        orphanPid = findPidByPort(_state.value.port)
+        return orphanPid
     }
 
     /** 从 /proc/<pid>/stat 的 starttime（自 boot 的 jiffies）与 /proc/uptime 计算进程运行时长。 */
@@ -237,19 +301,29 @@ object RuntimeManager {
         }
         scope.launch {
             downloadAndInstall()
+            // downloadAndInstall 结束时把阶段留在 STARTING（供 bootstrap 无缝衔接）；
+            // 这里只安装不启动，复位为 NOT_READY，否则启动卡片会一直停在「启动服务」。
+            if (_state.value.phase == ServerPhase.STARTING) {
+                _state.update { it.copy(phase = ServerPhase.NOT_READY, message = "运行时已安装") }
+            }
         }
     }
 
     /** 启动/检查流程：未安装 → 在线下载安装；已安装 → 启动服务。 */
+    @Synchronized
     fun bootstrap() {
         // 下载/安装/启动进行中：忽略重复触发（自动启动与手动点击并发时防重入）
-        if (_state.value.phase == ServerPhase.RUNNING ||
-            _state.value.phase == ServerPhase.DOWNLOADING ||
-            _state.value.phase == ServerPhase.EXTRACTING ||
-            _state.value.phase == ServerPhase.STARTING
+        val phaseNow = _state.value.phase
+        if (phaseNow == ServerPhase.RUNNING ||
+            phaseNow == ServerPhase.DOWNLOADING ||
+            phaseNow == ServerPhase.EXTRACTING
         ) {
             return
         }
+        // 已有启动流程在推进时忽略重复触发（界面自动启动与前台服务同时调用）；restart() 例外。
+        // 没有流程在推进的 STARTING 是残留状态（例如服务被系统重建时只拉起了进程却没人
+        // 等待就绪），继续往下走：端口已在监听就直接转为 RUNNING。
+        if (bootJob?.isActive == true && !forceRestart) return
         val force = forceRestart
         forceRestart = false
         val installed = isRuntimeInstalled()
@@ -264,7 +338,8 @@ object RuntimeManager {
             )
         }
         checkRuntimeUpdate()
-        scope.launch {
+        bootJob = scope.launch {
+            stopJob?.join()
             // 正常启动时若服务已在监听则直接复用；restart()（强制重启）必须重新装配并拉起新进程，
             // 否则旧进程端口未及时释放会误判为"已在运行"而跳过 dsh-mobile 装配
             if (!force && ping(_state.value.port)) {
@@ -272,7 +347,7 @@ object RuntimeManager {
                     it.copy(
                         phase = ServerPhase.RUNNING,
                         message = "服务运行中",
-                        pid = processPid(serverProcess),
+                        pid = currentPid(scan = true),
                     )
                 }
                 return@launch
@@ -324,10 +399,16 @@ object RuntimeManager {
         bootstrap()
     }
 
+    /** 前台服务（含被系统重建时）调用：没在运行就走完整启动流程（含等待就绪）。 */
+    fun ensureRunning() {
+        if (_state.value.phase != ServerPhase.RUNNING) bootstrap()
+    }
+
     /** 删除运行时并重新下载安装（用于修复损坏/权限异常）。删除移 IO 线程，避免大目录遍历卡 UI。 */
     fun rebuildRuntime() {
         stopServer()
         scope.launch {
+            stopJob?.join()
             withContext(Dispatchers.IO) { TermuxEnv.prefix(appContext).deleteRecursively() }
             clearRuntimeCache()
             _state.update { it.copy(phase = ServerPhase.NOT_READY, installed = false, runtimeVersion = null) }
@@ -339,6 +420,7 @@ object RuntimeManager {
     fun uninstallRuntime() {
         stopServer()
         scope.launch {
+            stopJob?.join()
             withContext(Dispatchers.IO) { TermuxEnv.prefix(appContext).deleteRecursively() }
             clearRuntimeCache()
             _state.update {
@@ -442,16 +524,43 @@ object RuntimeManager {
     fun clearData() {
         stopServer()
         scope.launch {
+            stopJob?.join()
             withContext(Dispatchers.IO) { TermuxEnv.dshHome(appContext).deleteRecursively() }
             _state.update { it.copy(phase = ServerPhase.NOT_READY) }
         }
     }
 
+    /**
+     * 停止服务。在主线程调用时立即把状态切到 NOT_READY，真正的结束进程（最多等 3 秒 +
+     * 按端口清理遗留进程）放到后台执行，避免界面卡住甚至 ANR；后台线程调用时同步执行。
+     */
     fun stopServer() {
-        serverProcess?.destroy()
-        runCatching { serverProcess?.waitFor(3, TimeUnit.SECONDS) }
-        serverProcess?.destroyForcibly()
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            // 用户主动停止/重启：结束仍在推进的启动流程，免得它看到进程被停掉后误报 ERROR
+            bootJob?.cancel()
+            _state.update { it.copy(phase = ServerPhase.NOT_READY, pid = null, message = "服务已停止") }
+            val previous = stopJob
+            stopJob = scope.launch {
+                previous?.join()
+                stopServerBlocking()
+            }
+        } else {
+            stopServerBlocking()
+        }
+    }
+
+    /** 停止服务专用锁（不能用 @Synchronized：会和主线程上的 bootstrap() 争同一把锁，卡住界面）。 */
+    private val stopLock = Any()
+
+    private fun stopServerBlocking() = synchronized(stopLock) {
+        val proc = serverProcess
+        expectedExit = proc
+        proc?.destroy()
+        runCatching { proc?.waitFor(3, TimeUnit.SECONDS) }
+        proc?.destroyForcibly()
         serverProcess = null
+        serverPid = null
+        orphanPid = null
         startedAt = 0L
         // 应用重启后 serverProcess 引用丢失，旧 node 进程仍可能存活并占用 usr 文件
         // （导致解压时 usr/bin/ls 等无法删除）。按端口反查并强制结束遗留进程。
@@ -590,7 +699,7 @@ object RuntimeManager {
 
     /** 环境页诊断快照（IO 线程执行，每秒轮询）。 */
     suspend fun diagnostics(): RuntimeDiagnostics = withContext(Dispatchers.IO) {
-        val pid = processPid(serverProcess)
+        val pid = currentPid(scan = _state.value.phase == ServerPhase.RUNNING)
         var cpu = 0.0
         var memKb = 0L
         var threads = 0
@@ -956,6 +1065,7 @@ object RuntimeManager {
 
     fun startServer() {
         if (_state.value.phase == ServerPhase.RUNNING || _state.value.phase == ServerPhase.STARTING) return
+        if (serverProcess?.isAlive == true) return
         val ctx = appContext
         TermuxEnv.home(ctx).mkdirs()
         TermuxEnv.tmp(ctx).mkdirs()
@@ -971,6 +1081,8 @@ object RuntimeManager {
 
         // 每次启动服务清空日志，终端日志框只展示本次过程（不做历史累积）。
         clearLog()
+        appendLog("[DSHM] 稳定性补丁 stability-v1（崩溃记录 / 停服不阻塞界面 / 意外退出自动重启）")
+        CrashRecorder.lastExitSummary?.let { appendLog(it) }
 
         // credentials-local 要求凭证文件仅属主可读（mode 600），否则拒绝读取
         // 导致 DeepSeek API Key 解析失败。Android 解压可能带 group/other 位，先收敛。
@@ -1008,8 +1120,59 @@ object RuntimeManager {
         }
         forwardProcessOutput(serverProcess, logFile)
         startedAt = System.currentTimeMillis()
+        serverPid = processPid(serverProcess)
+        orphanPid = null
+        watchProcessExit(serverProcess)
         _state.update {
-            it.copy(phase = ServerPhase.STARTING, pid = processPid(serverProcess), message = "正在启动服务…")
+            it.copy(phase = ServerPhase.STARTING, pid = serverPid, message = "正在启动服务…")
+        }
+    }
+
+    /**
+     * 等待 node 进程退出。非主动停止的退出写一份记录到 logs/crash；若退出前服务已在
+     * 正常运行且开启了自动重启，则在限流范围内自动重新拉起。启动阶段就退出的情况交给
+     * waitForReady 报错，不自动重启（多半是配置问题，重启也起不来）。
+     */
+    private fun watchProcessExit(proc: Process?) {
+        if (proc == null) return
+        scope.launch {
+            val code = runCatching { proc.waitFor() }.getOrNull()
+            if (proc === expectedExit) return@launch
+            val phaseBefore = _state.value.phase
+            val enabled = AppSettings.autoRestartServer(appContext)
+            val now = SystemClock.elapsedRealtime()
+            val allowed = synchronized(autoRestartTimes) {
+                while (autoRestartTimes.isNotEmpty() && now - autoRestartTimes.first() > AUTO_RESTART_WINDOW_MS) {
+                    autoRestartTimes.removeFirst()
+                }
+                autoRestartTimes.size < AUTO_RESTART_MAX
+            }
+            val willRestart = phaseBefore == ServerPhase.RUNNING && enabled && allowed
+            appendLog("[DSHM] 服务进程意外退出 exit=${code ?: "?"}（之前状态 ${phaseBefore.name}）")
+            CrashRecorder.recordServerExit(code, phaseBefore.name, tailLog(120), willRestart)
+            if (phaseBefore != ServerPhase.RUNNING || serverProcess !== proc) return@launch
+            serverProcess = null
+            serverPid = null
+            startedAt = 0L
+            if (!willRestart) {
+                _state.update {
+                    it.copy(
+                        phase = ServerPhase.ERROR,
+                        pid = null,
+                        message = "服务进程意外退出（exit=${code ?: "?"}）" +
+                            (if (enabled) "，短时间内重启次数过多，已停止自动重启" else "") +
+                            "\n\n${tailLog(40)}",
+                    )
+                }
+                return@launch
+            }
+            synchronized(autoRestartTimes) { autoRestartTimes.addLast(now) }
+            _state.update {
+                it.copy(phase = ServerPhase.NOT_READY, pid = null, message = "服务意外退出，正在自动重启…")
+            }
+            delay(2000)
+            appendLog("[DSHM] 自动重启服务…")
+            bootstrap()
         }
     }
 
@@ -1177,6 +1340,7 @@ object RuntimeManager {
             }
             if (ping(port)) {
                 _state.update { it.copy(phase = ServerPhase.RUNNING, message = "服务运行中") }
+                CrashRecorder.setStateSummary("server=running pid=${serverPid ?: "?"} port=$port")
                 return
             }
             delay(500)

@@ -20,6 +20,15 @@ object AppSettings {
         prefs(context).edit().putBoolean(KEY_AUTO_START, enabled).apply()
     }
 
+    private const val KEY_AUTO_RESTART = "auto_restart_server"
+
+    /** 服务进程意外退出时自动重新拉起（默认开）。 */
+    fun autoRestartServer(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO_RESTART, true)
+
+    fun setAutoRestartServer(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_AUTO_RESTART, enabled).apply()
+    }
+
     fun autoUpdate(context: Context): Boolean = prefs(context).getBoolean(KEY_AUTO_UPDATE, true)
 
     fun setAutoUpdate(context: Context, enabled: Boolean) {

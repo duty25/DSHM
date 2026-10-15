@@ -38,9 +38,9 @@ class HarnessService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (RuntimeManager.state.value.phase != ServerPhase.RUNNING) {
-            RuntimeManager.startServer()
-        }
+        // 必须走 bootstrap：它在后台线程完成装配与启动，并等待服务就绪后切到 RUNNING。
+        // 直接调 startServer() 只会停在 STARTING（没人等待就绪），还会在主线程跑维护脚本。
+        RuntimeManager.ensureRunning()
         // 启动后立即刷新通知（覆盖启动占位文本）
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification(statusText(RuntimeManager.state.value.phase)))
