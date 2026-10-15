@@ -34,10 +34,15 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.Autorenew
 import androidx.compose.material.icons.rounded.BatteryAlert
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Delete
@@ -87,6 +92,7 @@ import com.siliconleap.app.R
 import com.siliconleap.app.runtime.AddonManager
 import com.siliconleap.app.runtime.AppSettings
 import com.siliconleap.app.runtime.BackgroundGuard
+import com.siliconleap.app.runtime.CrashRecorder
 import com.siliconleap.app.runtime.RootManager
 import com.siliconleap.app.runtime.SourceManager
 import kotlinx.coroutines.Dispatchers
@@ -424,6 +430,8 @@ private fun BackgroundGuardCard() {
 private fun ServiceCard(state: RuntimeState) {
     val context = LocalContext.current
     var autoStart by remember { mutableStateOf(AppSettings.autoStartService(context)) }
+    var autoRestart by remember { mutableStateOf(AppSettings.autoRestartServer(context)) }
+    var showCrashLog by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier
             .padding(top = 12.dp)
@@ -472,6 +480,99 @@ private fun ServiceCard(state: RuntimeState) {
             },
             onClick = { RuntimeManager.restart() },
         )
+        SwitchPreference(
+            title = "服务意外退出时自动重启",
+            summary = "运行中的服务进程意外结束时自动重新拉起（10 分钟内最多 3 次）",
+            startAction = {
+                Icon(
+                    imageVector = Icons.Rounded.Autorenew,
+                    contentDescription = "自动重启",
+                    modifier = Modifier.padding(end = 6.dp),
+                    tint = colorScheme.onBackground,
+                )
+            },
+            checked = autoRestart,
+            onCheckedChange = { enabled ->
+                autoRestart = enabled
+                AppSettings.setAutoRestartServer(context, enabled)
+            },
+        )
+        ArrowPreference(
+            title = "崩溃与退出记录",
+            summary = "查看系统记录的退出原因、App 崩溃与服务退出记录",
+            startAction = {
+                Icon(
+                    imageVector = Icons.Rounded.BugReport,
+                    contentDescription = "崩溃与退出记录",
+                    modifier = Modifier.padding(end = 6.dp),
+                    tint = colorScheme.onBackground,
+                )
+            },
+            onClick = { showCrashLog = true },
+        )
+    }
+    if (showCrashLog) {
+        CrashLogDialog(onDismiss = { showCrashLog = false })
+    }
+}
+
+@Composable
+private fun CrashLogDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var report by remember { mutableStateOf("读取中…") }
+    var reloadKey by remember { mutableStateOf(0) }
+    LaunchedEffect(reloadKey) {
+        report = withContext(Dispatchers.IO) { CrashRecorder.report() }
+    }
+    WindowDialog(
+        show = true,
+        title = "崩溃与退出记录",
+        onDismissRequest = onDismiss,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(360.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(colorScheme.surfaceContainer)
+                .verticalScroll(rememberScrollState())
+                .padding(10.dp),
+        ) {
+            Text(
+                text = report,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = colorScheme.onBackground,
+            )
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(modifier = Modifier.fillMaxWidth()) {
+            TextButton(
+                text = "复制",
+                onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                    clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("DSHM 崩溃记录", report))
+                    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            TextButton(
+                text = "清空",
+                onClick = {
+                    CrashRecorder.clear()
+                    reloadKey++
+                },
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            TextButton(
+                text = "关闭",
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
+        }
     }
 }
 
