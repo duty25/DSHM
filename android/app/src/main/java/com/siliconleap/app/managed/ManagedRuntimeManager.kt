@@ -61,10 +61,25 @@ object ManagedRuntimeManager {
     private fun empty() = JSONObject().put("schemaVersion",1).put("active",JSONObject.NULL).put("previous",JSONObject.NULL).put("verified",JSONObject.NULL).put("revision",0)
     private fun selection(c: Context): JSONObject = File(stateDir(c),"selection.json").let { if(it.isFile)JSONObject(it.readText()) else empty() }.also { require(it.getInt("schemaVersion")==1) }
     private fun writeJson(file: File, json: JSONObject) {
-        val tmp=File(file.parentFile,file.name+".tmp-"+UUID.randomUUID())
-        try { FileOutputStream(tmp).use { it.write(json.toString(2).toByteArray());it.fd.sync() };Os.chmod(tmp.path,384);Files.move(tmp.toPath(),file.toPath(),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING)
-            val fd=Os.open(file.parentFile!!.path,OsConstants.O_RDONLY or OsConstants.O_DIRECTORY,0);try{Os.fsync(fd)}finally{Os.close(fd)}
-        } finally { tmp.delete() }
+        val tmp = File(file.parentFile, file.name + ".tmp-" + UUID.randomUUID())
+        try {
+            FileOutputStream(tmp).use {
+                it.write(json.toString(2).toByteArray())
+                it.fd.sync()
+            }
+            Os.chmod(tmp.path, 384)
+            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            // Android's public SDK has no O_DIRECTORY; validate the opened descriptor instead.
+            val fd = Os.open(file.parentFile!!.path, OsConstants.O_RDONLY, 0)
+            try {
+                require(OsConstants.S_ISDIR(Os.fstat(fd).st_mode)) { "选择记录的父路径必须为目录" }
+                Os.fsync(fd)
+            } finally {
+                Os.close(fd)
+            }
+        } finally {
+            tmp.delete()
+        }
     }
     /** OS releases this lock after crash. File existence is never treated as ownership. */
     private fun <T> locked(c: Context, block: () -> T): T = RandomAccessFile(File(stateDir(c),"selection.lock"),"rw").use { file -> file.channel.use { channel ->
