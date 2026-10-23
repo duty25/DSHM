@@ -1,4 +1,11 @@
-import argparse, hashlib, json, os, pathlib, re, shutil, struct, subprocess, zipfile
+import argparse, hashlib, json, os, pathlib, re, shutil, struct, subprocess, zipfile, sys, traceback
+def report_failure(kind, error, trace):
+    message = (kind.__name__ + ': ' + str(error))[:2400]
+    for old, new in (('%', '%25'), ('\r', '%0D'), ('\n', '%0A')):
+        message = message.replace(old, new)
+    print('::error title=APK verification failure::' + message, flush=True)
+    traceback.print_exception(kind, error, trace)
+sys.excepthook = report_failure
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CFG = json.loads((ROOT / 'upgrade/config.json').read_text())
 def digest(data):

@@ -67,7 +67,10 @@ jobs:
       run: |
         set -euo pipefail
         base="$RUNNER_TEMP/dshm-base.apk"
-        curl --fail --location --retry 2 --connect-timeout 20 --max-time 240 --output "$base" https://github.com/duty25/DSHM/releases/download/v2.1.1/app-release.apk
+        if ! curl --fail --location --retry 2 --connect-timeout 20 --max-time 240 --output "$base" https://github.com/duty25/DSHM/releases/download/v2.1.1/app-release.apk; then
+          echo "::error title=Base APK download failed::Could not retrieve the existing signed APK; native libraries were not replaced."
+          exit 1
+        fi
         python3 upgrade/verify_apk.py prepare --base "$base" --report "$RUNNER_TEMP/base-native.json"
     - uses: gradle/actions/setup-gradle@v4
     - name: Compile same-package signed upgrade
