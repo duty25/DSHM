@@ -16,7 +16,7 @@ def tools():
 def parse_single_signer(output):
     found = set()
     for line in output.splitlines():
-        if not re.match(r'^\s*Signer\b', line, re.I):
+        if not re.match(r'^\s*(?:V[1-4](?:\.\d+)?\s+)?Signer\b', line, re.I):
             continue
         if 'certificate' not in line.lower() or not re.search(r'SHA-?256', line, re.I):
             continue
