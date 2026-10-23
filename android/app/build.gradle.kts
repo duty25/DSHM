@@ -1,6 +1,44 @@
+import javax.inject.Inject
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileSystemOperations
+import org.gradle.api.tasks.InputDirectory
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+abstract class ManagedBootstrapAssets : DefaultTask() {
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sourceDirectory: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @get:Inject
+    abstract val fileSystemOperations: FileSystemOperations
+
+    @TaskAction
+    fun generate() {
+        fileSystemOperations.sync {
+            from(sourceDirectory) {
+                include("lib/**", "package.json")
+                into("managed-bootstrap")
+            }
+            into(outputDirectory)
+        }
+    }
+}
+
+val prepareManagedBootstrap by tasks.registering(ManagedBootstrapAssets::class) {
+    sourceDirectory.set(rootProject.layout.projectDirectory.dir("../managed-runtime"))
+    outputDirectory.set(layout.buildDirectory.dir("generated/managedAssets"))
 }
 
 android {
@@ -47,16 +85,6 @@ android {
         }
     }
 
-    val managedAssets = layout.buildDirectory.dir("generated/managedAssets")
-    val prepareManagedBootstrap by tasks.registering(Sync::class) {
-        from(rootProject.file("../managed-runtime")) {
-            include("lib/**", "package.json")
-        }
-        into(managedAssets.map { it.dir("managed-bootstrap") })
-    }
-    sourceSets.getByName("main").assets.srcDir(managedAssets)
-    tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(prepareManagedBootstrap) }
-
     buildTypes {
         create("managedPreview") {
             initWith(getByName("debug"))
@@ -95,6 +123,15 @@ android {
 
     aaptOptions {
         noCompress += "zip"
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("managedPreview")) { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            prepareManagedBootstrap,
+            ManagedBootstrapAssets::outputDirectory,
+        )
     }
 }
 

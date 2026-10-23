@@ -94,6 +94,32 @@ jobs:
           PYTHON
             exit "$status"
           fi
+      - name: Inspect preview APK payload
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import pathlib, struct, zipfile
+          apks = list(pathlib.Path('android/app/build/outputs/apk/managedPreview').glob('*.apk'))
+          assert len(apks) == 1, 'Expected one independent preview APK'
+          required = {
+              'assets/managed-bootstrap/package.json',
+              'assets/managed-bootstrap/lib/native-launch.cjs',
+              'assets/managed-bootstrap/lib/manifest.cjs',
+              'assets/managed-bootstrap/lib/launch-spec.cjs',
+              'assets/managed-bootstrap/lib/slot-store.cjs',
+              'assets/managed-native-support.zip',
+              'lib/arm64-v8a/libnode.so',
+              'lib/arm64-v8a/libproot.so',
+          }
+          with zipfile.ZipFile(apks[0]) as z:
+              missing = required - set(z.namelist())
+              assert not missing, 'Missing preview bootstrap files: ' + repr(sorted(missing))
+              for name in ('lib/arm64-v8a/libnode.so', 'lib/arm64-v8a/libproot.so'):
+                  with z.open(name) as f:
+                      header = f.read(20)
+                  assert header[:6] == b'\x7fELF\x02\x01' and struct.unpack('<H', header[18:20])[0] == 183, 'Expected arm64 ELF: ' + name
+          print('Preview APK bootstrap assets and arm64 launchers verified; device testing remains separate.')
+          PYTHON
       - name: Write preview limitations
         run: |
           cat > runtime-build/PREVIEW-README.txt <<'EOF'
