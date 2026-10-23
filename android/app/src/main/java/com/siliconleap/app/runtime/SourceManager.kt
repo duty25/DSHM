@@ -37,11 +37,11 @@ object SourceManager {
 
     /** 测速探测文件：runtime-latest 的 metadata.json（数百字节，测延迟）。 */
     private const val PROBE_URL =
-        "https://github.com/RochelimitDawn/DSHM/releases/download/runtime-latest/metadata.json"
+        "https://github.com/duty25/DSHM/releases/download/runtime-latest/metadata.json"
 
     /** 真实下载测速文件：runtime.zip（用 Range 拉前段测吞吐）。 */
     private const val SPEED_PROBE_URL =
-        "https://github.com/RochelimitDawn/DSHM/releases/download/runtime-latest/runtime.zip"
+        "https://github.com/duty25/DSHM/releases/download/runtime-latest/runtime.zip"
 
     /** 测速候选源（key=源 id，value=探测 URL）。 */
     private val CANDIDATES = listOf(

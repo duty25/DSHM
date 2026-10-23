@@ -55,9 +55,9 @@ data class SubsystemMeta(
  */
 object SubsystemManager {
     private const val DEBIAN_META_URL =
-        "https://github.com/RochelimitDawn/DSHM/releases/download/debian-subsystem/metadata.json"
+        "https://github.com/duty25/DSHM/releases/download/debian-subsystem/metadata.json"
     private const val UBUNTU_META_URL =
-        "https://github.com/RochelimitDawn/DSHM/releases/download/ubuntu-subsystem/metadata.json"
+        "https://github.com/duty25/DSHM/releases/download/ubuntu-subsystem/metadata.json"
 
     /** 按子系统发行版返回默认 metadata 地址。 */
     fun defaultMetaUrl(flavor: String): String = when (flavor) {

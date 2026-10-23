@@ -12,14 +12,14 @@ android {
         applicationId = "com.siliconleap.app"
         minSdk = 33
         targetSdk = 34
-        versionCode = 2014200
-        versionName = "v2.1.42"
+        versionCode = 2014300
+        versionName = "v2.1.43"
         // 应用期望的运行时版本（与 runtime-builder/build_runtime.sh 的 DSH_VERSION 一致；
         // 纯应用升级时版本不变则保留现有运行时，不触发检查更新）
         buildConfigField(
             "String",
             "RUNTIME_VERSION",
-            "\"${project.findProperty("runtimeVersion") ?: "0.1.0-rc.6"}\"",
+            "\"${project.findProperty("runtimeVersion") ?: "0.1.5-rc.2"}\"",
         )
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -46,7 +46,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

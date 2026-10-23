@@ -141,6 +141,14 @@ object TermuxEnv {
         if (ws.exists() && ws.canRead()) {
             argv += "-b"; argv += "${ws.absolutePath}:/workspace"
         }
+        // DSHM: 共享存储原路径 bind —— 让容器里也能用 /storage/emulated/0/... 这种
+        // 和宿主完全一样的路径（Termux 版就是这个行为）。注意：要真正读写，
+        // 需要在「设置 → 工作区与权限 → 文件访问权限」里授予「所有文件访问」，
+        // 否则路径可见但内容会 EACCES。
+        val sharedStorage = File("/storage/emulated/0")
+        if (sharedStorage.isDirectory) {
+            argv += "-b"; argv += "${sharedStorage.absolutePath}:${sharedStorage.absolutePath}"
+        }
         argv += "-b"; argv += "${tmp(context).absolutePath}:/tmp"
         argv += "/bin/bash"
         return JSONArray(argv).toString()

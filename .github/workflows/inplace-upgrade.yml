@@ -1,0 +1,111 @@
+name: DSHM Same-App In-place Upgrade
+'on':
+  push:
+    branches:
+    - fix/inplace-dshm-2.1.43
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: inplace-dshm-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+    - name: Check app-only upgrade source
+      run: python3 upgrade/check_source.py
+    - name: 'Signing identity: existing app only'
+      env:
+        KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+        KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
+      run: |
+        set -euo pipefail
+        missing=()
+        for name in KEYSTORE_BASE64 KEYSTORE_PASS KEY_ALIAS KEY_PASS; do
+          if [ -z "${!name}" ]; then missing+=("$name"); fi
+        done
+        if [ "${#missing[@]}" -ne 0 ]; then
+          echo "::error title=Signing identity required::Missing existing Android signing Secrets. Configure ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASS, ANDROID_KEY_ALIAS, ANDROID_KEY_PASS; no debug or embedded-key fallback."
+          exit 1
+        fi
+        printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/dshm-release.keystore"
+        chmod 600 "$RUNNER_TEMP/dshm-release.keystore"
+        keytool -exportcert -keystore "$RUNNER_TEMP/dshm-release.keystore" -storepass:env KEYSTORE_PASS -alias "$KEY_ALIAS" -file "$RUNNER_TEMP/configured-cert.der"
+        python3 - <<'PYTHON'
+        import hashlib,json,os,pathlib
+        expected=json.loads(pathlib.Path('upgrade/config.json').read_text())['signerSha256']
+        actual=hashlib.sha256((pathlib.Path(os.environ['RUNNER_TEMP'])/'configured-cert.der').read_bytes()).hexdigest()
+        assert actual==expected, 'Configured certificate is not the recorded existing DSHM certificate'
+        print('Existing signing certificate matched: '+actual)
+        PYTHON
+        {
+          echo "SILICONLEAP_KEYSTORE_PATH=$RUNNER_TEMP/dshm-release.keystore"
+          echo "SILICONLEAP_KEYSTORE_PASS=$KEYSTORE_PASS"
+          echo "SILICONLEAP_KEY_ALIAS=$KEY_ALIAS"
+          echo "SILICONLEAP_KEY_PASS=$KEY_PASS"
+        } >> "$GITHUB_ENV"
+    - name: Prepare Android SDK
+      run: |
+        set -euo pipefail
+        SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+        CT="$SDK/cmdline-tools/latest/bin"
+        test -x "$CT/sdkmanager"
+        yes | "$CT/sdkmanager" --licenses >/dev/null 2>&1 || true
+        "$CT/sdkmanager" --install 'platforms;android-37.0' 'build-tools;37.0.0'
+        echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+        echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+    - name: Download pinned existing APK; keep its native libraries
+      run: |
+        set -euo pipefail
+        base="$RUNNER_TEMP/dshm-base.apk"
+        curl --fail --location --retry 2 --connect-timeout 20 --max-time 240 --output "$base" https://github.com/duty25/DSHM/releases/download/v2.1.1/app-release.apk
+        python3 upgrade/verify_apk.py prepare --base "$base" --report "$RUNNER_TEMP/base-native.json"
+    - uses: gradle/actions/setup-gradle@v4
+    - name: Compile same-package signed upgrade
+      working-directory: android
+      run: |
+        set -euo pipefail
+        log="$RUNNER_TEMP/inplace-gradle.log"
+        if bash ./gradlew assembleRelease --no-daemon --no-configuration-cache --console=plain -PruntimeVersion=0.1.5-rc.2 >"$log" 2>&1; then
+          cat "$log"
+        else
+          status=$?
+          cat "$log"
+          python3 - "$log" <<'PYTHON'
+        import pathlib,sys
+        text=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+        failure=text[text.rfind('FAILURE:'):] if 'FAILURE:' in text else text[-3000:]
+        diag=[line for line in text.splitlines() if line.lstrip().startswith(('e:','error:'))]
+        msg=(failure[:1500]+'\n'+'\n'.join(diag[-8:])).strip()[:2800]
+        for old,new in (('%','%25'),('\r','%0D'),('\n','%0A')):msg=msg.replace(old,new)
+        print('::error title=In-place Gradle failure::'+msg)
+        PYTHON
+          exit "$status"
+        fi
+    - name: Verify same package, upgrade version, certificate and native bytes
+      run: |
+        set -euo pipefail
+        mkdir -p delivery
+        cp android/app/build/outputs/apk/release/app-release.apk delivery/dshm-v2.1.43-inplace.apk
+        python3 upgrade/verify_apk.py verify --base "$RUNNER_TEMP/dshm-base.apk" --apk delivery/dshm-v2.1.43-inplace.apk --report delivery/upgrade-verification.json
+    - uses: actions/upload-artifact@v4
+      with:
+        name: dshm-inplace-v2.1.43
+        path: |-
+          delivery/*.apk
+          delivery/*.sha256
+          delivery/upgrade-verification.json
+        if-no-files-found: error
+        retention-days: 14
+    - name: Remove temporary signing material
+      if: always()
+      run: rm -f "$RUNNER_TEMP/dshm-release.keystore" "$RUNNER_TEMP/configured-cert.der"

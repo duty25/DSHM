@@ -39,3 +39,7 @@ __pycache__/
 
 # 本地上传的字体压缩包（不提交）
 AaGuDianKeBenSongYouMoBan.zip
+
+# App-only CI outputs and Python checks
+upgrade/__pycache__/
+/delivery/

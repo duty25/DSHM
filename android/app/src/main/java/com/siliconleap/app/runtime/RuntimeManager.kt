@@ -45,7 +45,7 @@ data class RuntimeState(
     val progress: Float = 0f,
     val speedBytesPerSec: Long = 0L,
     val message: String = "",
-    val port: Int = 3080,
+    val port: Int = 3082,
     val pid: Long? = null,
     val runtimeVersion: String? = null,
     val installed: Boolean = false,
@@ -96,7 +96,7 @@ object RuntimeManager {
 
     /** 默认元数据地址（GitHub Releases，runtime-latest 资产自动更新）。 */
     const val DEFAULT_META_URL =
-        "https://github.com/RochelimitDawn/DSHM/releases/download/runtime-latest/metadata.json"
+        "https://github.com/duty25/DSHM/releases/download/runtime-latest/metadata.json"
 
     /** 按下载源解析 metadata URL（github / ghproxy_cf / ghproxy_axisnow / custom；auto 先测速解析实际源）。 */
     fun effectiveMetaUrl(context: Context): String = when (SourceManager.resolve(context)) {
@@ -261,6 +261,32 @@ object RuntimeManager {
         }.getOrDefault(0L)
     }
 
+    /** DSHM: 从任意日志文本里提取 dsh 打印的带 token 网址（没有就返回 null）。 */
+    fun extractHarnessUrl(text: String): String? {
+        // 保险：万一输出里带 ANSI 颜色码，先剥掉再匹配
+        val clean = text.replace(Regex("\\u001B\\[[0-9;]*[A-Za-z]"), "")
+        // 首选：直接找带 token 的网址（不依赖前缀文案）
+        Regex("http://\\S*?\\?token=[A-Za-z0-9_\\-]+={0,2}").find(clean)?.let { return it.value }
+        // 退而求其次：dsh 打印的那一行
+        Regex("dsh web:\\s*(http://\\S+)").find(clean)?.let { return it.groupValues[1] }
+        return null
+    }
+
+    /** DSHM: dsh 启动时打印的带 token 网址（内存 + 小文件，随服务启动一起重置）。 */
+    @Volatile
+    private var capturedHarnessUrl: String? = null
+
+    /** DSHM: 「拿不到网址就重启一次服务」每个 App 进程只做一次。 */
+    private var urlRecoveryTried = false
+
+    /** DSHM: 供「打开 Harness」取用；还没捕获到就返回 null。 */
+    fun harnessUrl(): String? = capturedHarnessUrl ?: runCatching {
+        val f = File(TermuxEnv.logs(appContext), "harness-url.txt")
+        if (!f.exists()) return@runCatching null
+        val text = f.readText().trim()
+        if (text.isEmpty()) null else text
+    }.getOrNull()
+
     fun tailLog(lines: Int = 80): String {
         val log = TermuxEnv.serverLog(appContext)
         return if (log.exists()) LogStore.named(log).tail(lines) else "(暂无日志)"
@@ -342,7 +368,24 @@ object RuntimeManager {
             stopJob?.join()
             // 正常启动时若服务已在监听则直接复用；restart()（强制重启）必须重新装配并拉起新进程，
             // 否则旧进程端口未及时释放会误判为"已在运行"而跳过 dsh-mobile 装配
+            // DSHM: 上一代 App / 已安装运行时留下的 cookie 属性会让「打开 Harness」第一次
+            // 打开就 401（详见 patchRuntimeAuthCookie 的注释）。先就地修正；确实改动了就重启
+            // 一次服务让新代码生效 —— 只可能发生一次，之后幂等跳过，不会反复重启。
+            if (patchRuntimeAuthCookie()) {
+                appendLog("[DSHM] 已修正运行时 cookie 属性，重启服务使其生效…")
+                restart()
+                return@launch
+            }
             if (!force && ping(_state.value.port)) {
+                // DSHM: 端口虽然在监听，但可能是【上一代 App 进程】启动的 harness —— 我们
+                // 没读过它的输出、也拿不到它的带 token 网址，「打开 Harness」必然 401。
+                // 这种情况强制重启一次，换一个我们能抓到网址的进程（每个 App 进程最多一次；
+                // 日志/文件里能取到网址时照旧直接复用，不会打断正在跑的对话）。
+                if (!urlRecoveryTried && harnessUrl() == null && extractHarnessUrl(tailLog(600)) == null) {
+                    urlRecoveryTried = true
+                    restart()
+                    return@launch
+                }
                 _state.update {
                     it.copy(
                         phase = ServerPhase.RUNNING,
@@ -1056,6 +1099,52 @@ object RuntimeManager {
 
     // ------------------------------------------------------------------ 服务启动
 
+    // DSHM: 运行时 cookie 补丁（就地改 SameSite=Strict → Lax）
+    /**
+     * DSHM: 把已安装运行时里 dsh 网页会话 cookie 的 SameSite=Strict 就地改成 Lax。
+     *
+     * 为什么必须改：dsh >= 0.1.1 的网页鉴权是「GET /?token=... → 303 跳回 / 并下发
+     * cookie」。从外部 App（「打开 Harness」按钮）发起导航时，浏览器把它当作跨站导航，
+     * SameSite=Strict 的 cookie 在 303 之后那一跳不会被带上 —— 于是 token 是对的、cookie
+     * 也已经下发，用户看到的却仍是 401 "dsh web authentication required"，手动刷新一次
+     * （浏览器自己发起的同站导航）才正常。改成 Lax 后顶层 GET 跳转放行，第一次就能进。
+     *
+     * 就地改文件而不是重下运行时：运行时约 500 MB；这里只改一处属性，幂等，装上新 APK
+     * 后首次启动即生效，重装运行时之后也会自动再补一次。
+     *
+     * @return true 表示本次真的改写了文件（调用方应重启服务让新代码生效）
+     */
+    private fun patchRuntimeAuthCookie(): Boolean {
+        val rel = "lib/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js"
+        val file = File(TermuxEnv.prefix(appContext), rel)
+        if (!file.isFile) {
+            appendLog("[DSHM] 运行时 cookie 补丁: 还没装运行时，找不到 $rel（跳过）")
+            return false
+        }
+        val text = runCatching { file.readText() }.getOrNull()
+        if (text == null) {
+            appendLog("[DSHM] 运行时 cookie 补丁: 读取 $rel 失败（跳过）")
+            return false
+        }
+        if (!text.contains("SameSite=Strict")) {
+            if (text.contains("SameSite=Lax")) {
+                appendLog("[DSHM] 运行时 cookie 补丁: 已是 Lax，无需改动")
+            } else {
+                appendLog("[DSHM] 运行时 cookie 补丁: 没找到 SameSite 属性（未改动）")
+            }
+            return false
+        }
+        val wrote = runCatching {
+            file.writeText(text.replace("SameSite=Strict", "SameSite=Lax"))
+        }.isSuccess
+        if (wrote) {
+            appendLog("[DSHM] 运行时 cookie 补丁: SameSite Strict → Lax（修「首次打开 401」）")
+        } else {
+            appendLog("[DSHM] 运行时 cookie 补丁: 写入失败，本次未生效")
+        }
+        return wrote
+    }
+
     private suspend fun startServerIfNeeded() {
         if (_state.value.phase == ServerPhase.RUNNING) return
         startServer()
@@ -1094,12 +1183,19 @@ object RuntimeManager {
             }
         }
 
+        // DSHM: 维护钩子（见 maintenanceHook 的注释）。放在 preflight 之前，
+        // 因此即使 preflight 直接判失败返回，日志里也已经有了 profile 配置。
+        maintenanceHook()
         val diag = preflight(node, entry)
         if (diag != null) {
             writeDiagnostics(logFile, diag)
             _state.update { it.copy(phase = ServerPhase.ERROR, message = "启动自检失败\n\n$diag") }
             return
         }
+
+        // DSHM: 拉起 node 之前再确认一次 cookie 属性（幂等）。放在 clearLog() 之后，
+        // 所以它写的那行会留在「查看运行日志」里 —— 装的运行时是什么状态一眼可见。
+        patchRuntimeAuthCookie()
 
         val command = listOf(node.absolutePath, "--expose-internals", entry.absolutePath, "web", "--port", port.toString())
         val pb = ProcessBuilder(command)
@@ -1185,6 +1281,16 @@ object RuntimeManager {
             try {
                 for (line in reader.lineSequence()) {
                     log.append(line)
+                    // DSHM: 读到 dsh 打印的带 token 网址就立刻存下来（内存 + 小文件），
+                    // 不依赖日志落盘时机、也不怕日志环形缓冲把它挤掉。
+                    runCatching {
+                        extractHarnessUrl(line)?.let {
+                            capturedHarnessUrl = it
+                            runCatching {
+                                File(TermuxEnv.logs(appContext), "harness-url.txt").writeText(it)
+                            }
+                        }
+                    }
                 }
             } catch (_: Exception) {
                 // 进程被销毁时读流可能中断，属预期
@@ -1193,6 +1299,77 @@ object RuntimeManager {
                 runCatching { reader.close() }
             }
         }
+    }
+
+    /**
+     * DSHM: 启动前维护钩子。
+     *
+     * dsh 因为 profile 配置问题起不来时，应用仍然会走到这里 —— 这是唯一一条不需要
+     * 启动服务、也不需要 root 就能读到 DSH_HOME 的通路（本进程就是那些文件的属主）。
+     *
+     * 每次启动服务都会执行，做两件事：
+     *   1) 把 profiles/web 的关键配置打进运行日志，便于定位启动失败的原因；
+     *   2) 若工作区里存在 dshm-fix.sh，则以本应用身份、带运行时环境执行它并记录输出。
+     */
+    private fun maintenanceHook() {
+        appendLog("===== DSHM 维护钩子 =====")
+        val home = TermuxEnv.dshHome(appContext)
+        val profile = File(home, "profiles/web")
+        appendLog("dshHome=" + home.absolutePath)
+        appendLog("profile=" + profile.absolutePath + " isDir=" + profile.isDirectory)
+        val manifest = File(profile, "package.json")
+        appendLog("--- profiles/web/package.json ---")
+        if (manifest.isFile) {
+            appendLog("配置存在，保留原内容；不在启动日志记录配置正文（" + manifest.length() + " bytes）")
+        } else {
+            appendLog("(不存在)")
+        }
+        val userPatch = File(profile, "cordis.patch.yml")
+        if (userPatch.isFile) {
+            appendLog("--- profiles/web/cordis.patch.yml ---")
+            appendLog("补丁存在，保留原内容；不在启动日志记录配置正文（" + userPatch.length() + " bytes）")
+        }
+        val nm = File(profile, "node_modules")
+        if (nm.isDirectory) {
+            appendLog("--- profiles/web/node_modules ---")
+            appendLog(nm.list()?.sorted()?.joinToString(", ") ?: "(list failed)")
+        }
+        val candidates = listOf(
+            File(TermuxEnv.workspace(appContext), "dshm-fix.sh"),
+            File("/storage/emulated/0/DSHM/dshm-fix.sh"),
+        )
+        val script = candidates.firstOrNull { it.isFile && it.canRead() }
+        if (script == null) {
+            appendLog("--- 未找到 dshm-fix.sh ---")
+            for (c in candidates) appendLog("   checked: " + c.absolutePath)
+        } else {
+            appendLog("--- run " + script.absolutePath + " ---")
+            for (line in runMaintenanceScript(script).lineSequence()) appendLog(line)
+        }
+    }
+
+    /** DSHM: 以本应用身份执行维护脚本（只有 nativeLibraryDir 里的可执行文件允许 exec）。 */
+    private fun runMaintenanceScript(script: File): String {
+        val bash = File(TermuxEnv.nativeLibDir(appContext), "libbash.so")
+        if (!bash.isFile) return "(libbash.so not found)"
+        return runCatching {
+            val pb = ProcessBuilder(bash.absolutePath, script.absolutePath)
+            pb.environment().putAll(TermuxEnv.serverEnv(appContext))
+            pb.directory(TermuxEnv.workspace(appContext))
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            val out = StringBuilder()
+            val reader = Thread {
+                runCatching { p.inputStream.bufferedReader().forEachLine { out.appendLine(it) } }
+            }
+            reader.isDaemon = true
+            reader.start()
+            reader.join(120000L)
+            val code = runCatching { p.exitValue() }.getOrDefault(-1)
+            runCatching { p.destroyForcibly() }
+            out.append("(exit=").append(code).append(")")
+            out.toString()
+        }.getOrElse { "(script failed: " + (it.message ?: it.javaClass.simpleName) + ")" }
     }
 
     private fun preflight(node: File, entry: File): String? {
@@ -1225,6 +1402,12 @@ object RuntimeManager {
     /** 清空服务日志文件（每次下载/启动时调用，终端日志框不做历史累积）。 */
     private fun clearLog() {
         LogStore.named(TermuxEnv.serverLog(appContext)).clear()
+        // DSHM: 换一个 harness 进程就换一个 token，所以启动时把上次捕获的网址清掉，
+        // 免得「打开 Harness」拿到旧 token 又变成 401。
+        capturedHarnessUrl = null
+        runCatching { File(TermuxEnv.logs(appContext), "harness-url.txt").delete() }
+        // DSHM: 版本标记 —— 在「查看运行日志」里能直接看到装的是哪一版补丁
+        appendLog("[DSHM] 补丁版本 token-fix-v6 (2026-09-17)")
     }
 
     private fun processPid(p: Process?): Long? {
@@ -1357,8 +1540,8 @@ object RuntimeManager {
             conn.readTimeout = 800
             val code = conn.responseCode
             conn.disconnect()
-            // 只要拿到任意 HTTP 响应码即说明服务在监听（DSH 根路径可能返回 404/重定向）
-            code in 100..599
+            // 只确认Web入口已响应；404/5xx不再误报启动成功，插件业务仍需另行验证。
+            code in 200..399 || code == 401
         } catch (_: Exception) {
             false
         }

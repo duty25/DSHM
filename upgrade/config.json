@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "package": "com.siliconleap.app",
+  "versionName": "v2.1.43",
+  "versionCode": 2014300,
+  "nativeRuntimeVersion": "0.1.5-rc.2",
+  "baseApk": {
+    "url": "https://github.com/duty25/DSHM/releases/download/v2.1.1/app-release.apk",
+    "sha256": "b13aa1ff2aeabd7af598a8fb905df207a6f355547a99a557a349cad7c43685f0",
+    "versionCode": 2014200
+  },
+  "signerSha256": "36dec1623ad73905782029548fa4f64c833cadf6386b9ae6d804a04c34b865ad",
+  "nativeLibraries": {
+    "libnode.so": "a0d21a1589312919114b24a5cc520c30ab7f26f9985b3f0c643c153172ebd1e6",
+    "libproot.so": "ea47e17da8e6ff4882c169c6508861e5b4be9227e477c6020f4f14facc85c10d",
+    "libbash.so": "0179c7b15fb3df857608ef745daa17077523ffc42b7755ccc725ad7a712698a2",
+    "libsh.so": "0179c7b15fb3df857608ef745daa17077523ffc42b7755ccc725ad7a712698a2",
+    "librg.so": "5adfd20e4c350aecd718bbef048a57a3fbabe0402c9c39a25eb40a28f1b19543"
+  }
+}

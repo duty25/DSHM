@@ -436,7 +436,35 @@ private fun formatUptime(ms: Long): String {
 }
 
 private fun openHarness(context: Context, port: Int) {
-    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:$port/"))
+    // dsh >= 0.1.1 的网页加了启动 token 鉴权：裸地址会返回 401
+    // "dsh web authentication required"。按可靠性依次取 dsh 打印的那行网址：
+    //   1) RuntimeManager 在读到 harness 输出时抓下来的（内存 / 随服务启动的小文件）
+    //   2) 内存日志缓冲里的（界面「查看运行日志」看的就是它）
+    //   3) 日志文件开头 8KB（进程重启后内存为空时的兜底）
+    var printedUrl = RuntimeManager.harnessUrl()
+    if (printedUrl == null) {
+        printedUrl = RuntimeManager.extractHarnessUrl(RuntimeManager.tailLog(600))
+    }
+    if (printedUrl == null) {
+        printedUrl = runCatching {
+            val log = com.siliconleap.app.runtime.TermuxEnv.serverLog(context)
+            if (!log.exists()) return@runCatching null
+            val raf = java.io.RandomAccessFile(log, "r")
+            try {
+                val n = minOf(raf.length(), 8192L).toInt()
+                val buf = ByteArray(n)
+                raf.readFully(buf)
+                RuntimeManager.extractHarnessUrl(String(buf, Charsets.UTF_8))
+            } finally {
+                raf.close()
+            }
+        }.getOrNull()
+    }
+    val url = printedUrl ?: "http://127.0.0.1:$port/"
+    // DSHM: 总是把即将打开的网址显示出来 —— 万一还进不去，一眼就能看出是「没带 token」
+    // 还是「带了但被拒」，不用再猜。
+    android.widget.Toast.makeText(context, "正在打开本次服务入口", android.widget.Toast.LENGTH_LONG).show()
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { context.startActivity(intent) }
 }

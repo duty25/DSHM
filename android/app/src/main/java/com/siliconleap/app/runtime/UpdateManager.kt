@@ -1,6 +1,8 @@
 package com.siliconleap.app.runtime
 
 import android.content.Context
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -8,6 +10,7 @@ import androidx.core.content.FileProvider
 import com.siliconleap.app.BuildConfig
 import java.io.BufferedOutputStream
 import java.io.File
+import java.security.MessageDigest
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -29,7 +32,7 @@ import org.json.JSONObject
  * 安装仅替换 APK，filesDir 数据（运行时/工作区/会话）保留，实现无缝切换。
  */
 object UpdateManager {
-    private const val REPO = "RochelimitDawn/DSHM"
+    private const val REPO = "duty25/DSHM"
     private const val LATEST_API = "https://api.github.com/repos/$REPO/releases/latest"
     private const val APK_ASSET = "app-release.apk"
 
@@ -234,7 +237,28 @@ object UpdateManager {
         }
     }
 
+    /** Reject a different package, downgrade or signing identity; never suggest clearing app data. */
+    private fun verifyUpgradeCandidate(context: Context, apk: File) {
+        val pm = context.packageManager
+        val flags = PackageManager.GET_SIGNING_CERTIFICATES
+        val installed = pm.getPackageInfo(context.packageName, flags)
+        val incoming = pm.getPackageArchiveInfo(apk.absolutePath, flags)
+            ?: error("无法读取升级安装包")
+        require(incoming.packageName == context.packageName) { "安装包不是当前DSHM，已停止" }
+        require(incoming.longVersionCode >= installed.longVersionCode) { "安装包版本较旧，已停止" }
+        fun certificates(info: PackageInfo): Set<String> = info.signingInfo?.apkContentsSigners
+            ?.map { signature ->
+                MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
+                    .joinToString("") { "%02x".format(it.toInt() and 255) }
+            }?.toSet().orEmpty()
+        val expected = certificates(installed)
+        require(expected.isNotEmpty() && certificates(incoming) == expected) {
+            "升级包签名与当前应用不同，不能保留数据覆盖；请勿卸载或清除数据"
+        }
+    }
+
     private fun installApk(context: Context, apk: File) {
+        verifyUpgradeCandidate(context, apk)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apk)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
