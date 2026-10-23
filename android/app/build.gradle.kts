@@ -21,6 +21,10 @@ android {
             "RUNTIME_VERSION",
             "\"${project.findProperty("runtimeVersion") ?: "0.1.0-rc.6"}\"",
         )
+        val runtimeRepository = (project.findProperty("runtimeRepository")?.toString()
+            ?: System.getenv("GITHUB_REPOSITORY") ?: "duty25/DSHM")
+        require(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+").matches(runtimeRepository))
+        buildConfigField("String", "RUNTIME_REPOSITORY", "\"$runtimeRepository\"")
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -43,7 +47,23 @@ android {
         }
     }
 
+    val managedAssets = layout.buildDirectory.dir("generated/managedAssets")
+    val prepareManagedBootstrap by tasks.registering(Sync::class) {
+        from(rootProject.file("../managed-runtime")) {
+            include("lib/**", "package.json")
+        }
+        into(managedAssets.map { it.dir("managed-bootstrap") })
+    }
+    sourceSets.getByName("main").assets.srcDir(managedAssets)
+    tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(prepareManagedBootstrap) }
+
     buildTypes {
+        create("managedPreview") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".linuxpreview"
+            versionNameSuffix = "-linux017-preview"
+            matchingFallbacks += listOf("debug")
+        }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")

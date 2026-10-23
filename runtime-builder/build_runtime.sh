@@ -10,6 +10,8 @@ TERMUX_APP_VER="${TERMUX_APP_VER:-v0.118.3}"
 DSH_VERSION="${DSH_VERSION:-0.1.0-rc.6}"
 NODE_VER="${NODE_VER:-v22.19.0}"
 BUILD_PTY="${BUILD_PTY:-1}"
+# Native bootstrap package is distinct from a DSH SDK. The preview never uses old SDK modules.
+BOOTSTRAP_ONLY="${BOOTSTRAP_ONLY:-0}"
 # 镜像源（CI 可覆盖为大学镜像加速）
 TERMUX_MIRROR="${TERMUX_MIRROR:-https://packages.termux.dev/apt/termux-main}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
@@ -77,6 +79,9 @@ v = json.load(open(sys.argv[1]))
 print("    nodejs =", v.get("nodejs"), " ripgrep =", v.get("ripgrep"))
 PY
 
+if [ "$BOOTSTRAP_ONLY" = "1" ]; then
+  echo "==> 原生引导模式：不安装 DSH SDK、pnpm 或 Android SDK 桩补丁"
+else
 echo "==> [3/6] 安装 @deepseek-ai/dsh@${DSH_VERSION}"
 npm install --prefix "$PREFIX/lib" "@deepseek-ai/dsh@${DSH_VERSION}" \
   --omit=dev --ignore-scripts --no-audit --no-fund --registry="$NPM_REGISTRY"
@@ -101,6 +106,8 @@ fi
 
 echo "==> [5/6] 应用运行时补丁"
 node "$SCRIPT_DIR/patch_runtime.js" "$PREFIX"
+
+fi
 
 echo "==> [6/6] 准备 proot 原生（jniLibs + runtime libtalloc）"
 NATIVE="$WORK/native-libs"
@@ -129,8 +136,12 @@ STAGE="$WORK/stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -rL "$PREFIX" "$STAGE/usr"
-cp "$SCRIPT_DIR/launcher/run-dsh.sh" "$STAGE/usr/bin/run-dsh"
-chmod +x "$STAGE/usr/bin/run-dsh"
+if [ "$BOOTSTRAP_ONLY" != "1" ]; then
+  cp "$SCRIPT_DIR/launcher/run-dsh.sh" "$STAGE/usr/bin/run-dsh"
+  chmod +x "$STAGE/usr/bin/run-dsh"
+else
+  test ! -e "$STAGE/usr/lib/node_modules/@deepseek-ai/dsh/package.json"
+fi
 # 打包 usr 的内容（条目为 bin/ lib/ 等，不含 usr/ 前缀），
 # 应用解压到 prefix（filesDir/usr）后即得正确的 usr/bin/node
 (cd "$STAGE/usr" && zip -r -q "$OUT/runtime.zip" .)
@@ -141,9 +152,12 @@ RUNTIME_SHA256=$(sha256sum "$OUT/runtime.zip" | awk '{print $1}')
 GH_REPO="${GITHUB_REPOSITORY:-RochelimitDawn/SiliconLeap}"
 RUNTIME_TAG="${RUNTIME_TAG:-runtime-latest}"
 RUNTIME_BASE="https://github.com/${GH_REPO}/releases/download/${RUNTIME_TAG}"
+META_VERSION="$DSH_VERSION"
+META_DSH="$DSH_VERSION"
+if [ "$BOOTSTRAP_ONLY" = "1" ]; then META_VERSION="native-bootstrap-v1"; META_DSH=""; fi
 cat > "$OUT/metadata.json" <<EOF
 {
-  "version": "$DSH_VERSION",
+  "version": "$META_VERSION",
   "url": "$RUNTIME_BASE/runtime.zip",
   "sha256": "$RUNTIME_SHA256",
   "sizeBytes": $(stat -c %s "$OUT/runtime.zip"),
@@ -152,7 +166,7 @@ cat > "$OUT/metadata.json" <<EOF
   ],
   "arch": "$ARCH",
   "termuxApp": "$TERMUX_APP_VER",
-  "dsh": "$DSH_VERSION",
+  "dsh": "$META_DSH",
   "nodeVersion": "$NODE_VER",
   "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }

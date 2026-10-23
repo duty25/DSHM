@@ -1,0 +1,33 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {normalizeManifest,verifySlot,inside,sha256}=require('../lib/manifest.cjs');
+const {emptySelection,transition,SlotStore}=require('../lib/slot-store.cjs');
+const {startTicks,ownedGuest,buildLaunchSpec}=require('../lib/launch-spec.cjs');
+function fixture(run){
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'dshm-source-test-')),slot=path.join(root,'slots','linux017-a');
+ const members={'node/bin/node':'test-node','node_modules/@deepseek-ai/dsh/lib/bin.js':'test-cli','node_modules/@deepseek-ai/dsh/package.json':JSON.stringify({version:'0.1.7-rc.1'}),'bootstrap/guest-guard.mjs':'// fixture'};
+ const files=Object.entries(members).map(([p,text])=>{const f=path.join(slot,p);fs.mkdirSync(path.dirname(f),{recursive:true});fs.writeFileSync(f,text);return {path:p,size:Buffer.byteLength(text),sha256:sha256(text),executable:p==='node/bin/node'};});
+ const manifest={schemaVersion:1,id:'linux017-a',backend:'linux-proot',arch:'arm64',dshVersion:'0.1.7-rc.1',nodeVersion:'24.22.0',dataSchema:'dsh-session-v4',node:'node/bin/node',cli:'node_modules/@deepseek-ai/dsh/lib/bin.js',files,symlinks:[],plugins:[]};
+ fs.writeFileSync(path.join(slot,'manifest.json'),JSON.stringify(manifest));
+ try{return run({root,slot,manifest});}finally{fs.rmSync(root,{recursive:true,force:true});}
+}
+test('pinned bundle verifies',()=>fixture(f=>assert.equal(verifySlot(f.slot).manifest.id,'linux017-a')));
+for(const p of ['../escape','/absolute','a/../b','a//b','a\\b','a\0b'])test('reject path '+JSON.stringify(p),()=>assert.throws(()=>inside('/tmp/root',p)));
+test('reject changed core version',()=>fixture(f=>assert.throws(()=>normalizeManifest({...f.manifest,dshVersion:'0.2.0-rc.2'}))));
+test('reject changed Node version',()=>fixture(f=>assert.throws(()=>normalizeManifest({...f.manifest,nodeVersion:'26.4.0'}))));
+test('detect tampered file',()=>fixture(f=>{fs.writeFileSync(path.join(f.slot,f.manifest.cli),'bad-byte');assert.throws(()=>verifySlot(f.slot));}));
+test('reject duplicate archive path',()=>fixture(f=>assert.throws(()=>normalizeManifest({...f.manifest,files:[...f.manifest.files,f.manifest.files[0]]}))));
+test('reject symlink escape',()=>fixture(f=>assert.throws(()=>normalizeManifest({...f.manifest,symlinks:[{path:'link',target:'../outside'}]}))));
+test('reject symlink ancestor',()=>fixture(f=>assert.throws(()=>normalizeManifest({...f.manifest,symlinks:[{path:'node',target:'other'}]}))));
+test('reject duplicate plugin providers',()=>fixture(f=>{const p={name:'plugin',version:'1',contentSha256:'a'.repeat(64)};assert.throws(()=>normalizeManifest({...f.manifest,plugins:[p,p]}));}));
+test('require explicit stop and current revision',()=>{const s=emptySelection(),pin={id:'a',manifestSha256:'a'.repeat(64)};assert.throws(()=>transition(s,'activate',{pin,expectedRevision:0}));assert.throws(()=>transition(s,'activate',{pin,serviceStopped:true,expectedRevision:1}));});
+test('activation is not business verification',()=>{const a={id:'a',manifestSha256:'a'.repeat(64)},b={id:'b',manifestSha256:'b'.repeat(64)};let s=transition(emptySelection(),'activate',{pin:a,serviceStopped:true,expectedRevision:0,dataSchema:'v4'});s=transition(s,'activate',{pin:b,serviceStopped:true,expectedRevision:1,dataSchema:'v4',activeDataSchema:'v4'});assert.deepEqual(s.previous,a);assert.equal(s.verified,null);assert.throws(()=>transition(s,'verify',{expectedRevision:2}));assert.deepEqual(transition(s,'verify',{expectedRevision:2,explicitlyConfirmed:true}).verified,b);});
+test('rollback cannot undo data format',()=>{const s={...emptySelection(),active:{id:'b',manifestSha256:'b'.repeat(64)},previous:{id:'a',manifestSha256:'a'.repeat(64)}};assert.throws(()=>transition(s,'rollback',{pin:s.previous,serviceStopped:true,expectedRevision:0,dataSchema:'v3',activeDataSchema:'v4'}));assert.equal(transition(s,'rollback',{pin:s.previous,serviceStopped:true,expectedRevision:0,dataSchema:'v4',activeDataSchema:'v4'}).active.id,'a');});
+test('selected manifest is immutable by digest',()=>fixture(f=>{const state=path.join(f.root,'state');fs.mkdirSync(state);const pin={id:f.manifest.id,manifestSha256:sha256(fs.readFileSync(path.join(f.slot,'manifest.json')))};fs.writeFileSync(path.join(state,'selection.json'),JSON.stringify({...emptySelection(),active:pin}));const store=new SlotStore(state,path.dirname(f.slot));assert.equal(store.active().manifest.id,pin.id);pin.manifestSha256='0'.repeat(64);fs.writeFileSync(path.join(state,'selection.json'),JSON.stringify({...emptySelection(),active:pin}));assert.throws(()=>store.active());}));
+function stat(pid,tick){const fields=Array(20).fill('0');fields[0]='S';fields[19]=String(tick);return `${pid} (node with (spaces)) ${fields.join(' ')}`;}
+test('process identity handles spaces in comm',()=>assert.equal(startTicks(stat(7,901)),'901'));
+test('stop refuses reused PID, foreign launch and parent',()=>{const e={nativePid:50,tag:'a'.repeat(32),slotId:'linux017-a',cli:'/opt/dshm/current/cli'},r={pid:51,nativeParent:50,startTicks:'99',tag:e.tag,slotId:e.slotId,cli:e.cli},read=()=>stat(51,99);assert.equal(ownedGuest(r,e,read),true);assert.equal(ownedGuest({...r,startTicks:'98'},e,read),false);assert.equal(ownedGuest({...r,pid:50},e,read),false);assert.equal(ownedGuest({...r,tag:'b'.repeat(32)},e,read),false);});
+test('explicit proot spec has no legacy SDK or native guest environment',()=>fixture(f=>{const c={schemaVersion:1,manifest:f.manifest,rootfs:'/app/rootfs',slotRoot:f.slot,dataRoot:'/app/data',userHome:'/app/user',tmpRoot:'/app/tmp',workspace:'/storage/work',pidRoot:'/app/pids',proot:'/native/libproot.so',nativeLibDir:'/native',supportLibDir:'/app/support',port:39017};const built=buildLaunchSpec(c,{PREFIX:'/old/usr',NODE_OPTIONS:'--bad',DSH_SUBSYSTEM_ARGV:'bad'},{nativePid:50,nativeStart:'123',tag:'a'.repeat(32)});assert.ok(built.argv.includes('--kill-on-exit'));assert.ok(built.argv.includes('-i'));assert.ok(built.argv.includes('/opt/dshm/current/node/bin/node'));assert.ok(built.argv.includes('DSHM_MANAGED_RUNTIME=1'));assert.ok(!built.argv.some(v=>/^(PREFIX|NODE_OPTIONS|DSH_SUBSYSTEM_ARGV)=/.test(v)));assert.ok(!JSON.stringify(built.argv).includes('dsh-atomic-write'));assert.ok(built.argv.includes('39017'));}));
+test('invalid port rejected before spawn',()=>fixture(f=>assert.throws(()=>buildLaunchSpec({schemaVersion:1,manifest:f.manifest,port:3082.1},{},{}))));
+test('bootstrap does not import old SDK',()=>{const s=fs.readFileSync(path.join(__dirname,'../lib/native-launch.cjs'),'utf8');assert.ok(!s.includes('usr/lib/node_modules'));assert.ok(!s.includes('dsh-atomic-write'));});

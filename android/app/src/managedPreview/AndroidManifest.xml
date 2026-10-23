@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <application android:name="android.app.Application" android:label="DSHM Linux 0.1.7 预览" tools:replace="android:name,android:label">
+    <activity android:name=".MainActivity" tools:node="remove" />
+    <service android:name=".runtime.HarnessService" tools:node="remove" />
+    <activity android:name=".managed.ManagedRuntimeActivity" android:exported="true">
+      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+    </activity>
+    <service android:name=".managed.ManagedRuntimeService" android:exported="false" android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-started local AI server with explicit start/stop and persistent status notification" />
+    </service>
+  </application>
+</manifest>

@@ -276,3 +276,8 @@ Required Notice: Copyright RochelimitDawn (https://github.com/RochelimitDawn/DSH
 | 💡 爱发电赞助入口 | [ifdian.net/a/Rochelimit](https://www.ifdian.net/a/Rochelimit) |
 
 > 合作 · 反馈 · 支持，欢迎随时联络
+
+
+## Linux 0.1.7 工程预览（独立分支）
+
+运行时版本化、原生恢复及独立预览构建见 [managed-runtime/README.md](managed-runtime/README.md)。这不代表已完成正式替换或全部插件业务验收。

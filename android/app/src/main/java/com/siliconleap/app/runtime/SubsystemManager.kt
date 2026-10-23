@@ -1,6 +1,7 @@
 package com.siliconleap.app.runtime
 
 import android.content.Context
+import com.siliconleap.app.BuildConfig
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -54,10 +55,10 @@ data class SubsystemMeta(
  * 实际 shell 命令由 DSH 服务经 proot 包裹执行（每次调用冷启动，无常驻进程）。
  */
 object SubsystemManager {
-    private const val DEBIAN_META_URL =
-        "https://github.com/RochelimitDawn/DSHM/releases/download/debian-subsystem/metadata.json"
-    private const val UBUNTU_META_URL =
-        "https://github.com/RochelimitDawn/DSHM/releases/download/ubuntu-subsystem/metadata.json"
+    private val DEBIAN_META_URL =
+        "https://github.com/${BuildConfig.RUNTIME_REPOSITORY}/releases/download/debian-subsystem/metadata.json"
+    private val UBUNTU_META_URL =
+        "https://github.com/${BuildConfig.RUNTIME_REPOSITORY}/releases/download/ubuntu-subsystem/metadata.json"
 
     /** 按子系统发行版返回默认 metadata 地址。 */
     fun defaultMetaUrl(flavor: String): String = when (flavor) {

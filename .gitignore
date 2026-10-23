@@ -39,3 +39,10 @@ __pycache__/
 
 # 本地上传的字体压缩包（不提交）
 AaGuDianKeBenSongYouMoBan.zip
+
+# Managed preview build output; never commit private code bundles or user data.
+managed-runtime/output/
+runtime-build/
+android/app/src/managedPreview/assets/*.zip
+android/app/src/main/jniLibs/
+*.runtime.zip
