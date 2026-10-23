@@ -13,14 +13,27 @@ def digest(data):
 def tools():
     sdk = pathlib.Path(os.environ.get('ANDROID_HOME') or os.environ['ANDROID_SDK_ROOT'])
     return sdk / 'build-tools/37.0.0'
+def parse_single_signer(output):
+    found = set()
+    for line in output.splitlines():
+        if not re.match(r'^\s*Signer\b', line, re.I):
+            continue
+        if 'certificate' not in line.lower() or not re.search(r'SHA-?256', line, re.I):
+            continue
+        match = re.search(r':\s*([0-9a-fA-F:]{64,95})\s*$', line)
+        if match:
+            value = match[1].replace(':', '').lower()
+            if len(value) == 64:
+                found.add(value)
+    assert len(found) == 1, 'Expected exactly one APK signing certificate; public verifier output: ' + output[:1600]
+    return found.pop()
 def metadata(apk):
     info = subprocess.check_output([str(tools() / 'aapt2'), 'dump', 'badging', str(apk)], text=True)
     match = re.search(r"package: name='([^']+)' versionCode='(\d+)' versionName='([^']+)'", info)
     assert match, 'APK package metadata missing'
-    certs = subprocess.check_output([str(tools() / 'apksigner'), 'verify', '--print-certs', str(apk)], text=True)
-    cert = re.search(r'Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F:]+)', certs)
-    assert cert, 'APK signing certificate missing'
-    return {'package': match[1], 'versionCode': int(match[2]), 'versionName': match[3], 'signerSha256': cert[1].replace(':', '').lower()}
+    certs = subprocess.check_output([str(tools() / 'apksigner'), 'verify', '--print-certs', str(apk)], text=True, stderr=subprocess.STDOUT)
+    signer = parse_single_signer(certs)
+    return {'package': match[1], 'versionCode': int(match[2]), 'versionName': match[3], 'signerSha256': signer}
 def checked_base(apk):
     assert digest(apk.read_bytes()) == CFG['baseApk']['sha256'], 'Base APK digest differs from pinned release'
     meta = metadata(apk)
