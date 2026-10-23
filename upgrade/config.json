@@ -11,10 +11,14 @@
   },
   "signerSha256": "36dec1623ad73905782029548fa4f64c833cadf6386b9ae6d804a04c34b865ad",
   "nativeLibraries": {
-    "libnode.so": "a0d21a1589312919114b24a5cc520c30ab7f26f9985b3f0c643c153172ebd1e6",
-    "libproot.so": "ea47e17da8e6ff4882c169c6508861e5b4be9227e477c6020f4f14facc85c10d",
-    "libbash.so": "0179c7b15fb3df857608ef745daa17077523ffc42b7755ccc725ad7a712698a2",
-    "libsh.so": "0179c7b15fb3df857608ef745daa17077523ffc42b7755ccc725ad7a712698a2",
-    "librg.so": "5adfd20e4c350aecd718bbef048a57a3fbabe0402c9c39a25eb40a28f1b19543"
-  }
+    "libnode.so": "a0d21a1589312919114b24a5cc520c30ab7f26f9985b3f0c643c153172ebd1e6"
+  },
+  "requiredNativeArm64": [
+    "libnode.so",
+    "libproot.so",
+    "libbash.so",
+    "libsh.so",
+    "librg.so"
+  ],
+  "nativeBaseline": "entire pinned and signature-verified base release APK"
 }

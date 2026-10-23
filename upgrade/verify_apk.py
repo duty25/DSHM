@@ -47,9 +47,11 @@ def native(z):
             short = name.removeprefix('lib/arm64-v8a/')
             assert '/' not in short and short not in result, 'Invalid/duplicate native-library name'
             b = z.read(name)
-            if short in CFG['nativeLibraries']:
+            if short in CFG['requiredNativeArm64']:
                 assert b[:6] == b'\x7fELF\x02\x01' and struct.unpack('<H', b[18:20])[0] == 183, 'Required native executable is not arm64 ELF: ' + short
             result[short] = digest(b)
+    for name in CFG['requiredNativeArm64']:
+        assert name in result, 'Required original native library missing: ' + name
     for name, expected in CFG['nativeLibraries'].items():
         assert result.get(name) == expected, 'Native library differs from existing APK reference: ' + name
     return result
