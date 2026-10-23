@@ -74,7 +74,26 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Compile independent preview APK
         working-directory: android
-        run: bash ./gradlew assembleManagedPreview --no-daemon --no-configuration-cache -PruntimeRepository="${GITHUB_REPOSITORY}"
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/managed-preview-gradle.log"
+          if bash ./gradlew assembleManagedPreview --no-daemon --no-configuration-cache --console=plain -PruntimeRepository="${GITHUB_REPOSITORY}" >"$log" 2>&1; then
+            cat "$log"
+          else
+            status=$?
+            cat "$log"
+            python3 - "$log" <<'PYTHON'
+          import pathlib, sys
+          text = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+          failure = text[text.rfind("FAILURE:"):] if "FAILURE:" in text else text
+          diagnostics = [line for line in text.splitlines() if line.lstrip().startswith(("e:", "error:"))]
+          summary = (failure[:1500] + "\n" + "\n".join(diagnostics[-8:])).strip()[:2800]
+          for old, new in (("%", "%25"), ("\r", "%0D"), ("\n", "%0A")):
+              summary = summary.replace(old, new)
+          print("::error title=Managed preview Gradle failure::" + summary)
+          PYTHON
+            exit "$status"
+          fi
       - name: Write preview limitations
         run: |
           cat > runtime-build/PREVIEW-README.txt <<'EOF'
