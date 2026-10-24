@@ -88,6 +88,8 @@ object TermuxEnv {
             "PNPM_CJS" to "$prefix/lib/node_modules/pnpm/bin/pnpm.cjs",
             // 可执行文件直接用 nativeLibraryDir 绝对路径（app 数据目录被 SELinux 禁止执行，
             // filesDir/bin 符号链接 exec 会 EACCES；nativeLibraryDir 与 node 服务同样可执行）
+            // 原生 0.1.7 会话/文件发布的真实 flock 绑定（arm64，随内置运行时安装到 usr/lib）
+            "DSHM_ANDROID_FLOCK_PATH" to "$prefix/lib/libdshm_flock.so",
             "DSH_RG_PATH" to "$nativeLib/librg.so",
             "DSH_BASH_PATH" to "$nativeLib/libbash.so",
             "DSH_SH_PATH" to "$nativeLib/libsh.so",

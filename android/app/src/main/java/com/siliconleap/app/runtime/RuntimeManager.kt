@@ -91,6 +91,7 @@ data class RuntimeDiagnostics(
 )
 
 object RuntimeManager {
+    private const val BUNDLED_RUNTIME_ASSET = "runtime/dsh-native017.zip"
     private const val READY_TIMEOUT_MS = 120_000L
     private const val DOWNLOAD_TIMEOUT_MS = 20 * 60_000L
 
@@ -308,6 +309,72 @@ object RuntimeManager {
 
     fun isRuntimeInstalled(): Boolean = TermuxEnv.dshEntry(appContext).exists()
 
+    /** 是否存在随 APK 打包的原生运行时。 */
+    fun hasBundledRuntime(): Boolean = runCatching {
+        appContext.assets.open(BUNDLED_RUNTIME_ASSET).use { true }
+    }.getOrDefault(false)
+
+    /**
+     * 合并安装内置原生运行时：只替换 lib/node_modules 与原生锁库，
+     * 保留 usr 下 bin/etc 等既有文件；旧模块重命名为 node_modules.prev 便于回退。
+     */
+    private suspend fun installBundledSdk(): Boolean = withContext(Dispatchers.IO) {
+        val ctx = appContext
+        val prefix = TermuxEnv.prefix(ctx)
+        val tmp = File(TermuxEnv.filesDir(ctx), "bundled-runtime.tmp")
+        try {
+            stopServer()
+            appendLog("> 解压内置原生 DSH ${BuildConfig.RUNTIME_VERSION} 运行时…")
+            tmp.deleteRecursively()
+            tmp.mkdirs()
+            var done = 0L
+            ZipInputStream(ctx.assets.open(BUNDLED_RUNTIME_ASSET).buffered()).use { input ->
+                var entry = input.nextEntry
+                while (entry != null) {
+                    val target = safeResolve(tmp, entry.name)
+                    if (target != null) {
+                        if (entry.isDirectory) {
+                            target.mkdirs()
+                        } else {
+                            target.parentFile?.mkdirs()
+                            FileOutputStream(target).use { out -> input.copyTo(out) }
+                        }
+                    }
+                    entry = input.nextEntry
+                    done++
+                    if (done % 400L == 0L) appendLog("> 解压中 $done 个文件…")
+                }
+            }
+            val staged = File(tmp, "lib/node_modules")
+            if (!File(staged, "@deepseek-ai/dsh/lib/bin.js").exists()) {
+                appendLog("! 内置运行时缺少 dsh 入口")
+                tmp.deleteRecursively()
+                return@withContext false
+            }
+            val libDir = File(prefix, "lib").apply { mkdirs() }
+            val targetModules = File(libDir, "node_modules")
+            val backup = File(libDir, "node_modules.prev")
+            if (targetModules.exists()) {
+                backup.deleteRecursively()
+                if (!targetModules.renameTo(backup)) appendLog("! 旧 node_modules 备份失败，继续覆盖安装")
+            }
+            appendLog("> 安装原生 SDK…")
+            copyRecursively(staged, targetModules)
+            File(tmp, "lib/libdshm_flock.so").takeIf { it.isFile }
+                ?.copyTo(File(libDir, "libdshm_flock.so"), overwrite = true)
+            tmp.deleteRecursively()
+            AppSettings.setRuntimeInstalled(ctx, true)
+            AppSettings.setRuntimeVersion(ctx, BuildConfig.RUNTIME_VERSION)
+            _state.update { it.copy(installed = true, runtimeVersion = BuildConfig.RUNTIME_VERSION) }
+            appendLog("> 内置原生运行时安装完成：${BuildConfig.RUNTIME_VERSION}")
+            true
+        } catch (e: Exception) {
+            appendLog("! 内置运行时安装失败: ${e.javaClass.simpleName}: ${e.message}")
+            tmp.deleteRecursively()
+            false
+        }
+    }
+
     /** 仅下载并安装运行时（不自动启动），供环境页点击拉取。 */
     fun installRuntime() {
         if (_state.value.phase == ServerPhase.DOWNLOADING ||
@@ -395,9 +462,15 @@ object RuntimeManager {
                 }
                 return@launch
             }
-            if (!installed) {
+            val bundledReady = readRuntimeVersion() == BuildConfig.RUNTIME_VERSION
+            if (hasBundledRuntime() && !bundledReady) {
+                _state.update { it.copy(phase = ServerPhase.EXTRACTING, progress = 0f, message = "正在安装内置原生 DSH 运行时…") }
+                if (!installBundledSdk()) {
+                    _state.update { it.copy(phase = ServerPhase.ERROR, message = "内置运行时安装失败，请查看运行日志") }
+                    return@launch
+                }
+            } else if (!installed) {
                 downloadAndInstall()
-                // 下载/解压失败：保留真实错误，不再进入启动自检（避免被 preflight 诊断覆盖）
                 if (_state.value.phase == ServerPhase.ERROR) return@launch
             }
             // 装配 DSH WebUI 移动端适配插件（dsh-mobile-nav），best effort 不阻塞
