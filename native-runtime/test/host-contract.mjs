@@ -1,13 +1,15 @@
 import * as fs from 'node:fs/promises';
+import {createRequire} from 'node:module';
 import os from 'node:os';import path from 'node:path';import net from 'node:net';
 import assert from 'node:assert/strict';import {spawn} from 'node:child_process';import {fileURLToPath} from 'node:url';
-const report={platform:process.platform,node:process.version,realModelCalls:0,realSessionsUsed:false,passed:false};
+const {makeHostPatch}=createRequire(import.meta.url)('./host-fixture.cjs');
+const report={checks:[],platform:process.platform,node:process.version,realModelCalls:0,realSessionsUsed:false,passed:false};
 assert.equal(process.platform,process.env.DSHM_EXPECT_PLATFORM||'android');
 const sdk=process.env.DSHM_NATIVE_CORE_ROOT;assert.ok(sdk&&path.isAbsolute(sdk));const marker=JSON.parse(await fs.readFile(path.join(sdk,'.dshm-native017-candidate.json')));assert.equal(marker.production,false);
 const own=path.dirname(fileURLToPath(import.meta.url));const root=await fs.mkdtemp(path.join(os.tmpdir(),'dshm-native-host-'));
 const home=path.join(root,'home'),dsh=path.join(root,'dsh-home'),profile=path.join(dsh,'profiles/web');await fs.mkdir(profile,{recursive:true});await fs.mkdir(home);await fs.mkdir(path.join(root,'tmp'));
 await fs.writeFile(path.join(profile,'package.json'),JSON.stringify({private:true,type:'module',bundles:['@deepseek-ai/dsh-base','@deepseek-ai/dsh-web-app'],dependencies:{}}));
-await fs.writeFile(path.join(profile,'cordis.patch.yml'),'- id: permission\n  config:\n    defaultPreset: danger-full-access\n- id: sandbox-policy\n  config:\n    mode: danger-full-access\n- insert:\n    id: native017-startup-observer\n    name: '+JSON.stringify(path.join(own,'startup-observer/index.mjs'))+'\n');
+await fs.writeFile(path.join(profile,'cordis.patch.yml'),JSON.stringify(makeHostPatch(path.join(own,'startup-observer/index.mjs')),null,2)+'\n');
 const port=await new Promise((resolve,reject)=>{const s=net.createServer();s.once('error',reject);s.listen(0,'127.0.0.1',()=>{const port=s.address().port;s.close(()=>resolve(port));});});
 const env={...process.env,HOME:home,DSH_HOME:dsh,TMPDIR:path.join(root,'tmp'),DSH_PERMISSION_MODE:'danger-full-access'};
 for(const key of Object.keys(env))if(/(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN|SECRET)$/.test(key))delete env[key];
@@ -29,8 +31,10 @@ try{
   await wait(400);
  }
  assert.ok(evidence,'Native authenticated startup observer never became ready');assert.equal(evidence.platform,'android');assert.ok(evidence.clientCount>0);assert.deepEqual(evidence.services,{sessionPersistence:true,shell:true,fs:true});
+ assert.equal(evidence.pid,child.pid,'Observer must belong to the owned test child');
+ report.checks.push({name:'actual-android-owned-host',passed:true},{name:'client-graph-nonempty',passed:true},{name:'required-services-active',passed:true},{name:'no-loader-failure-or-pending',passed:true});
  report.activeEntries=evidence.entries.filter(e=>e.state===2).length;report.clientCount=evidence.clientCount;report.services=evidence.services;report.loaderFailedOrPending=[];
- child.kill('SIGTERM');const end=await Promise.race([stopped,wait(10000).then(()=>null)]);assert.ok(end,'Owned native host did not stop normally');assert.equal(end.code,0);report.cleanShutdown=true;report.passed=true;
+ child.kill('SIGTERM');const end=await Promise.race([stopped,wait(10000).then(()=>null)]);assert.ok(end,'Owned native host did not stop normally');assert.equal(end.code,0);report.cleanShutdown=true;report.checks.push({name:'clean-owned-host-shutdown',passed:true});report.passed=true;
 }catch(error){report.error={message:error.message,code:error.code};process.exitCode=1;}
 finally{
  if(!exited){child.kill('SIGTERM');await Promise.race([stopped,wait(2000)]);if(!exited){child.kill('SIGKILL');await stopped;report.forcedOwnedTestStop=true;}}

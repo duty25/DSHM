@@ -16,11 +16,13 @@ adb shell "$base '$remote/usr/bin/node' '$remote/code/test/native-contract.mjs' 
 adb shell "$base '$remote/usr/bin/node' '$remote/code/test/publish-contract.mjs' android" | tee build/android-native-publish.json
 adb shell "$base '$remote/usr/bin/node' --expose-internals '$remote/code/test/session-contract.mjs'" | tee build/android-session-stdout.json
 adb pull "$remote/reports/native-session-contract.json" build/android-session-contract.json >/dev/null
+adb shell "$base '$remote/usr/bin/node' --expose-internals '$remote/code/test/fs-contract.mjs'" | tee build/android-fs-stdout.json
+adb pull "$remote/reports/native-fs-contract.json" build/android-fs-contract.json >/dev/null
 adb shell "$base '$remote/usr/bin/node' --expose-internals '$remote/code/test/host-contract.mjs'" | tee build/android-host-stdout.json
 adb pull "$remote/reports/native-host-contract.json" build/android-host-contract.json >/dev/null
 python3 - <<'CHECK'
 import json,pathlib
-for name in ['android-native-lock.json','android-native-publish.json','android-session-contract.json','android-host-contract.json']:
+for name in ['android-native-lock.json','android-native-publish.json','android-session-contract.json','android-host-contract.json','android-fs-contract.json']:
  d=json.loads((pathlib.Path('build')/name).read_text());assert d['passed'] is True,(name,d);assert d['platform']=='android';print('::notice title=Android native evidence::'+name+' platform='+d['platform']+' node='+d['node']+' passed='+str(len(d.get('checks',d.get('cases',[])))))
 CHECK
 # CI emulator scratch only; no command in this script targets a physical phone.
