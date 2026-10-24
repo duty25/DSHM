@@ -19,5 +19,9 @@ else
   [[ "$mode" == host ]] || exit 64
   compiler="${CC:-cc}"
 fi
-"$compiler" "${flags[@]}" -I "$headers" "$root/vendor/flock.c" -o "$out/libdshm_flock.so"
+python3 - "$root" "$out" <<'PREPARE'
+import sys,pathlib,json,hashlib
+root=pathlib.Path(sys.argv[1]);out=pathlib.Path(sys.argv[2]);b=(root/'vendor/flock.c').read_bytes();m=json.loads((root/'upstream.json').read_text());assert hashlib.sha256(b).hexdigest()==m['files']['flock.c'];s=b.decode();assert s.count('NAPI_MODULE_INIT()')==1;s=s.replace('NAPI_MODULE_INIT()', 'napi_value dshm_register_flock(napi_env env, napi_value exports)');(out/'flock-entry.c').write_text(s)
+PREPARE
+"$compiler" "${flags[@]}" -I "$headers" "$out/flock-entry.c" "$root/native/publish.c" "$root/native/module.c" -o "$out/libdshm_flock.so"
 sha256sum "$out/libdshm_flock.so"

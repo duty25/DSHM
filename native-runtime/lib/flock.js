@@ -54,3 +54,16 @@ export async function tryLockExclusive(fd) {
         syscall: 'flock',
     });
 }
+
+/** Android-only, no-overwrite publication. Never substitutes a plain rename. */
+export async function publishNoReplaceAndroid(source, target) {
+    if (process.platform !== 'android') throw new Error('Android publication adapter used on a different platform');
+    const require = createRequire(import.meta.url);
+    const native = require('./dshm-android-flock.cjs').loadBinding();
+    if (typeof native.renameNoReplace !== 'function') throw new Error('Native no-replace publication export is missing');
+    const errno = await new Promise((resolve) => native.renameNoReplace(source, target, resolve));
+    if (errno !== 0) {
+        const code = getSystemErrorName(-errno);
+        throw Object.assign(new Error(`${code}: no-replace publication failed`), {code, errno, syscall:'renameat2', path:source, dest:target});
+    }
+}

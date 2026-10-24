@@ -13,3 +13,9 @@ test('live or unmarked directories are rejected',t=>{const root=fixture(t);fs.wr
 test('wrong SDK version is rejected',t=>{const root=fixture(t);fs.writeFileSync(path.join(root,'node_modules/@deepseek-ai/dsh/package.json'),JSON.stringify({version:'0.2.0-rc.2'}));assert.throws(()=>apply(root),/pinned DSH/);});
 test('missing native library is an explicit error, not lock success',()=>{const old=process.env.DSHM_ANDROID_FLOCK_PATH;delete process.env.DSHM_ANDROID_FLOCK_PATH;try{assert.throws(()=>loader.loadBinding(),{code:'ERR_DSHM_FLOCK_PATH'});}finally{if(old!==undefined)process.env.DSHM_ANDROID_FLOCK_PATH=old;}});
 test('Android branch does not replace Linux or Darwin platform checks',()=>{const overlay=fs.readFileSync(path.join(__dirname,'../lib/flock.js'),'utf8');assert.match(overlay,/platform === 'android'/);assert.match(overlay,/platform !== 'linux' && platform !== 'darwin'/);assert.doesNotMatch(overlay,/noopBinding|callback\(0\)|defineProperty\(process/);});
+
+const {transform}=require('../tools/apply-session.cjs');
+test('session publication adapter is narrowly anchored and preserves collision semantics',()=>{
+ const input=['import { tryLockExclusive } from "@deepseek-ai/node-addon-system/flock";','await link(tmp, finalPath);','await internals.fs.link(staged, currentPath);','published && internals.platform === "win32"'].join('\n');
+ const out=transform(input);assert.match(out,/publishNoReplaceAndroid\(tmp, finalPath\)/);assert.match(out,/publishNoReplaceAndroid\(staged, currentPath\)/);assert.match(out,/else await link\(tmp, finalPath\)/);assert.match(out,/internals.platform === "android"/);assert.throws(()=>transform(input+'\nawait link(tmp, finalPath);'),/anchor mismatch/);
+});

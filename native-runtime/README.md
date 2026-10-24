@@ -9,3 +9,5 @@ Android JS 分支从显式的原生库路径加载该真实 Node-API 模块；�
 两个参考项目均为 MIT，已固定提交供架构研究；其空锁方案不采用。此处复用的是 DeepSeek 原生 C 实现，许可证见 vendor/LICENSE-DeepSeek。参考结论见 docs/native017-references.md。
 
 本阶段尚未证明 Android 真机、完整会话或插件业务通过，未改当前生产运行时、数据或 App。主机侧静态/契约测试不得称 Android 实测。
+
+Android 模拟器已执行真实锁检查，第二轮在会话文件的硬链接发布处遇到 EACCES。因此新增原生 renameat2(RENAME_NOREPLACE) 绑定；只替换已审核的会话临时文件发布点与迁移发布点，保持 fsync 和 EEXIST 检查，不用普通覆盖 rename/copy。vendor/flock.c 未改字节；构建时仅将其模块初始化入口改名，与新发布导出组合，锁主体不变。当前仍未证明完整 App 或真机通过。

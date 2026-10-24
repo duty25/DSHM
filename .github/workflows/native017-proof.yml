@@ -33,6 +33,7 @@ jobs:
           set -euo pipefail
           bash native-runtime/tools/build-flock.sh build/host host 2>&1 | tee build/host-build.log
           DSHM_ANDROID_FLOCK_PATH="$PWD/build/host/libdshm_flock.so" node native-runtime/test/native-contract.mjs linux | tee build/host-native-lock.json
+          DSHM_ANDROID_FLOCK_PATH="$PWD/build/host/libdshm_flock.so" node native-runtime/test/publish-contract.mjs linux | tee build/host-native-publish.json
       - name: Android NDK
         run: |
           set -euo pipefail

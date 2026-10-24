@@ -13,12 +13,13 @@ adb push build/android-x64/libdshm_flock.so "$remote/libdshm_flock.so" >/dev/nul
 adb shell "chmod 700 '$remote/usr/bin/node'"
 base="env HOME=$remote/home TMPDIR=$remote/tmp OPENSSL_CONF=/dev/null LD_LIBRARY_PATH=$remote/usr/lib DSHM_ANDROID_FLOCK_PATH=$remote/libdshm_flock.so DSHM_NATIVE_CORE_ROOT=$remote/core DSHM_NATIVE_REPORT_DIR=$remote/reports DSHM_EXPECT_PLATFORM=android"
 adb shell "$base '$remote/usr/bin/node' '$remote/code/test/native-contract.mjs' android" | tee build/android-native-lock.json
+adb shell "$base '$remote/usr/bin/node' '$remote/code/test/publish-contract.mjs' android" | tee build/android-native-publish.json
 adb shell "$base '$remote/usr/bin/node' --expose-internals '$remote/code/test/session-contract.mjs'" | tee build/android-session-stdout.json
 adb pull "$remote/reports/native-session-contract.json" build/android-session-contract.json >/dev/null
 python3 - <<'CHECK'
 import json,pathlib
-for name in ['android-native-lock.json','android-session-contract.json']:
- d=json.loads((pathlib.Path('build')/name).read_text());assert d['passed'] is True,(name,d);assert d['platform']=='android';print(name, 'actual Android',d['node'])
+for name in ['android-native-lock.json','android-native-publish.json','android-session-contract.json']:
+ d=json.loads((pathlib.Path('build')/name).read_text());assert d['passed'] is True,(name,d);assert d['platform']=='android';print('::notice title=Android native evidence::'+name+' platform='+d['platform']+' node='+d['node']+' passed='+str(len(d.get('checks',d.get('cases',[])))))
 CHECK
 # CI emulator scratch only; no command in this script targets a physical phone.
 adb shell "rm -rf '$remote'"
