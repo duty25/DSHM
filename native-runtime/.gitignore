@@ -1,0 +1,4 @@
+sdk/node_modules/
+sdk/.dshm-native017-candidate.json
+sdk/native-flock-patch.json
+__pycache__/

@@ -1,0 +1,10 @@
+{
+  "source": "@deepseek-ai/node-addon-system@0.1.2",
+  "sourceUrl": "https://registry.npmjs.org/@deepseek-ai/node-addon-system/-/node-addon-system-0.1.2.tgz",
+  "license": "MIT",
+  "files": {
+    "flock.c": "c1aa773c7a62b03ce3973156b928f41773fef9407afd79d71b2f625b5616421f",
+    "upstream-flock.js": "e42af00c298d56322c073bf7cc66485096028318ab645a2e69dc2aa7481ba646",
+    "LICENSE-DeepSeek": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be"
+  }
+}

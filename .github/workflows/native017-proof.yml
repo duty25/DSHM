@@ -1,0 +1,87 @@
+name: DSHM Android Native 0.1.7 Proof
+on:
+  push:
+    branches: [feat/android-native-dsh017]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native017-proof-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.0'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Guarded JavaScript contracts
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          node --test native-runtime/test/patch.test.cjs | tee build/patch-contracts.log
+          git diff --check
+      - name: Compile and exercise genuine host binding
+        run: |
+          set -euo pipefail
+          bash native-runtime/tools/build-flock.sh build/host host 2>&1 | tee build/host-build.log
+          DSHM_ANDROID_FLOCK_PATH="$PWD/build/host/libdshm_flock.so" node native-runtime/test/native-contract.mjs linux | tee build/host-native-lock.json
+      - name: Android NDK
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" --install 'ndk;27.2.12479018'
+          echo "ANDROID_NDK_HOME=$SDK/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Compile actual bionic modules for arm64 and emulator
+        run: |
+          set -euo pipefail
+          bash native-runtime/tools/build-flock.sh build/android-arm64 android arm64 2>&1 | tee build/android-arm64-build.log
+          bash native-runtime/tools/build-flock.sh build/android-x64 android x64 2>&1 | tee build/android-x64-build.log
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d build/android-arm64/libdshm_flock.so > build/android-arm64-dynamic.log
+          ! grep -E 'libc.so.6|ld-linux|libstdc\+\+' build/android-arm64-dynamic.log
+      - name: Build fixed public 0.1.7 candidate SDK
+        run: |
+          set -euo pipefail
+          npm ci --prefix native-runtime/sdk --ignore-scripts --omit=dev --omit=optional --no-audit --no-fund 2>&1 | tee build/sdk-install.log
+          node native-runtime/tools/prepare-sdk.cjs | tee build/sdk-patch.log
+      - name: Pinned Android test Node, never an apt install
+        run: |
+          set -euo pipefail
+          python3 native-runtime/tools/fetch-test-node.py build/android-node 2>&1 | tee build/android-node-fetch.log
+      - name: Allow this ephemeral runner to use KVM
+        run: sudo chown "$USER" /dev/kvm
+      - name: Real Android emulator file locks and session persistence
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_2
+          ram-size: 1536M
+          heap-size: 256M
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: bash -o pipefail -c 'bash native-runtime/tools/run-android-proof.sh 2>&1 | tee build/android-proof.log'
+      - name: Bounded failure diagnostics
+        if: failure()
+        run: python3 native-runtime/tools/failure-summary.py
+      - name: Preserve proof and native modules (not an APK)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dshm-native017-proof
+          retention-days: 14
+          path: |
+            build/*.json
+            build/*.log
+            build/android-arm64/libdshm_flock.so
+            build/android-x64/libdshm_flock.so
+            native-runtime/vendor/LICENSE-DeepSeek
+            native-runtime/upstream.json
+            native-runtime/README.md

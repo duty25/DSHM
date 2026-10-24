@@ -1,0 +1,8 @@
+{
+  "name": "dshm-native017-candidate",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.7-rc.1"
+  }
+}
