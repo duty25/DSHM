@@ -106,12 +106,12 @@ jobs:
       run: |
         set -euo pipefail
         mkdir -p delivery
-        cp android/app/build/outputs/apk/release/app-release.apk delivery/dshm-v2.1.44-native017.apk
-        python3 upgrade/verify_apk.py verify --base "$RUNNER_TEMP/dshm-base.apk" --apk delivery/dshm-v2.1.44-native017.apk --report delivery/upgrade-verification.json
-        sha256sum delivery/dshm-v2.1.44-native017.apk > delivery/dshm-v2.1.44-native017.apk.sha256
+        cp android/app/build/outputs/apk/release/app-release.apk delivery/dshm-v2.1.45-native017.apk
+        python3 upgrade/verify_apk.py verify --base "$RUNNER_TEMP/dshm-base.apk" --apk delivery/dshm-v2.1.45-native017.apk --report delivery/upgrade-verification.json
+        sha256sum delivery/dshm-v2.1.45-native017.apk > delivery/dshm-v2.1.45-native017.apk.sha256
     - uses: actions/upload-artifact@v4
       with:
-        name: dshm-native017-v2.1.44
+        name: dshm-native017-v2.1.45
         path: |-
           delivery/*.apk
           delivery/*.sha256

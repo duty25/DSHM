@@ -12,8 +12,8 @@ android {
         applicationId = "com.siliconleap.app"
         minSdk = 33
         targetSdk = 34
-        versionCode = 2014400
-        versionName = "v2.1.44"
+        versionCode = 2014500
+        versionName = "v2.1.45"
         // 应用期望的运行时版本（与 runtime-builder/build_runtime.sh 的 DSH_VERSION 一致；
         // 纯应用升级时版本不变则保留现有运行时，不触发检查更新）
         buildConfigField(

@@ -92,6 +92,7 @@ data class RuntimeDiagnostics(
 
 object RuntimeManager {
     private const val BUNDLED_RUNTIME_ASSET = "runtime/dsh-native017.zip"
+    private const val LINUX_SESSION_EXPORT = "/storage/emulated/0/DSHM/10号/dshm-native017/linux-session-export"
     private const val READY_TIMEOUT_MS = 120_000L
     private const val DOWNLOAD_TIMEOUT_MS = 20 * 60_000L
 
@@ -309,6 +310,46 @@ object RuntimeManager {
 
     fun isRuntimeInstalled(): Boolean = TermuxEnv.dshEntry(appContext).exists()
 
+    /**
+     * 一次性导入 Linux 期间产生的 v4 会话（导出在共享存储）。
+     * 只补充目标缺失的 v4；同会话若存在旧 v3，先移入 .v3-superseded 备份，
+     * 避免 0.1.7 启动时新旧格式并存。幂等：完成后写标记文件。
+     */
+    private fun importLinuxSessionsOnce() {
+        val ctx = appContext
+        val dshHome = TermuxEnv.dshHome(ctx)
+        val marker = File(dshHome, ".linux-v4-import-done")
+        if (marker.exists()) return
+        val source = File(LINUX_SESSION_EXPORT)
+        if (!source.isDirectory) return
+        val target = File(dshHome, "sessions")
+        var copied = 0
+        var skipped = 0
+        var superseded = 0
+        source.walkTopDown()
+            .filter { it.isFile && it.name.startsWith("session.v4.jsonl") }
+            .forEach { src ->
+                val rel = src.relativeTo(source)
+                val dst = File(target, rel.path)
+                if (dst.exists()) {
+                    skipped++
+                    return@forEach
+                }
+                val sessionDir = dst.parentFile
+                sessionDir?.listFiles()
+                    ?.filter { it.name.startsWith("session.v3.jsonl") }
+                    ?.forEach { v3 ->
+                        val backup = File(sessionDir, ".v3-superseded")
+                        backup.mkdirs()
+                        if (v3.renameTo(File(backup, v3.name))) superseded++
+                    }
+                dst.parentFile?.mkdirs()
+                runCatching { src.copyTo(dst) }.onSuccess { copied++ }
+            }
+        marker.writeText("copied=$copied skipped=$skipped supersededV3=$superseded\n")
+        appendLog("> 已导入 Linux 会话：$copied 个（跳过 $skipped，v3 让位 $superseded）")
+    }
+
     /** 是否存在随 APK 打包的原生运行时。 */
     fun hasBundledRuntime(): Boolean = runCatching {
         appContext.assets.open(BUNDLED_RUNTIME_ASSET).use { true }
@@ -501,6 +542,7 @@ object RuntimeManager {
             }
             // 同步应用工作区到 DSH 的 workspace.json（WebUI 默认工作区跟随设置）
             syncWorkspaceToDsh()
+            withContext(Dispatchers.IO) { importLinuxSessionsOnce() }
             startServerIfNeeded()
         }
     }
