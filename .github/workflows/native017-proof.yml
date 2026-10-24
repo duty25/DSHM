@@ -26,6 +26,7 @@ jobs:
           set -euo pipefail
           mkdir -p build
           node --test native-runtime/test/patch.test.cjs | tee build/patch-contracts.log
+          python3 -m unittest discover -s native-runtime/test -p "*_test.py" 2>&1 | tee build/test-stage-contracts.log
           git diff --check
       - name: Compile and exercise genuine host binding
         run: |

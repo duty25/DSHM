@@ -3,11 +3,12 @@ set -euo pipefail
 remote="/data/local/tmp/dshm-native017-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
 [[ "$remote" =~ ^/data/local/tmp/dshm-native017-[a-zA-Z0-9-]+$ ]] || exit 64
 prefix="$PWD/build/android-node/extract/data/data/com.termux/files/usr"
+python3 native-runtime/tools/stage-android-test.py "$prefix" native-runtime/sdk build/android-test-stage
 adb shell "mkdir -p '$remote/home' '$remote/tmp' '$remote/code' '$remote/reports'"
-adb push "$prefix" "$remote/usr" >/dev/null
+adb push build/android-test-stage/node "$remote/usr" >/dev/null
 adb push native-runtime/lib "$remote/code/lib" >/dev/null
 adb push native-runtime/test "$remote/code/test" >/dev/null
-adb push native-runtime/sdk "$remote/core" >/dev/null
+adb push build/android-test-stage/core "$remote/core" >/dev/null
 adb push build/android-x64/libdshm_flock.so "$remote/libdshm_flock.so" >/dev/null
 adb shell "chmod 700 '$remote/usr/bin/node'"
 base="env HOME=$remote/home TMPDIR=$remote/tmp OPENSSL_CONF=/dev/null LD_LIBRARY_PATH=$remote/usr/lib DSHM_ANDROID_FLOCK_PATH=$remote/libdshm_flock.so DSHM_NATIVE_CORE_ROOT=$remote/core DSHM_NATIVE_REPORT_DIR=$remote/reports DSHM_EXPECT_PLATFORM=android"

@@ -18,7 +18,9 @@ if (process.argv[2] === '--child') {
   if (process.argv[3] === 'hold' && errno === 0) {
     globalThis.ownedHandle = handle;
     process.stdout.write(JSON.stringify({errno,pid:process.pid})+'\n');
-    setInterval(()=>{},1000);
+    const parentPid = process.ppid;
+    setInterval(()=>{if(process.ppid!==parentPid)process.exit(0);},500);
+    setTimeout(()=>process.exit(0),45000).unref();
   } else {
     await handle.close();
     console.log(JSON.stringify({errno}));
