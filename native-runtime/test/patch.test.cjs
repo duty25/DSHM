@@ -19,3 +19,8 @@ test('session publication adapter is narrowly anchored and preserves collision s
  const input=['import { tryLockExclusive } from "@deepseek-ai/node-addon-system/flock";','await link(tmp, finalPath);','await internals.fs.link(staged, currentPath);','published && internals.platform === "win32"'].join('\n');
  const out=transform(input);assert.match(out,/publishNoReplaceAndroid\(tmp, finalPath\)/);assert.match(out,/publishNoReplaceAndroid\(staged, currentPath\)/);assert.match(out,/else await link\(tmp, finalPath\)/);assert.match(out,/internals.platform === "android"/);assert.throws(()=>transform(input+'\nawait link(tmp, finalPath);'),/anchor mismatch/);
 });
+
+const vm=require('node:vm');
+function builtinFixture(flags){const box={exports:{},__filename:'/owned/index.js',process:{platform:'android',execArgv:flags},require:name=>{assert.equal(name,'node:module');return{createRequire:()=>id=>({id})};}};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../lib/require-builtin.cjs'),'utf8'),box);return box.exports;}
+test('builtin adapter only admits reviewed internal modules with explicit flag',()=>{const api=builtinFixture(['--expose-internals']);assert.equal(api.requireBuiltin('internal/modules/esm/loader').id,'internal/modules/esm/loader');assert.equal(api.isAllowedInternalId('fs'),false);assert.throws(()=>api.requireBuiltin('/private/file'),{code:'ERR_DSHM_INTERNAL_MODULE'});});
+test('builtin adapter fails without explicit Node startup flag',()=>{assert.throws(()=>builtinFixture([]).requireBuiltin('internal/modules/helpers'),{code:'ERR_DSHM_INTERNALS_FLAG'});});
