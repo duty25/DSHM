@@ -12,8 +12,8 @@ android {
         applicationId = "com.siliconleap.app"
         minSdk = 33
         targetSdk = 34
-        versionCode = 2014500
-        versionName = "v2.1.45"
+        versionCode = 2014600
+        versionName = "v2.1.46"
         // 应用期望的运行时版本（与 runtime-builder/build_runtime.sh 的 DSH_VERSION 一致；
         // 纯应用升级时版本不变则保留现有运行时，不触发检查更新）
         buildConfigField(
@@ -21,6 +21,8 @@ android {
             "RUNTIME_VERSION",
             "\"${project.findProperty("runtimeVersion") ?: "0.1.7-rc.1"}\"",
         )
+        // DSHM: 内置运行时构建戳（DSH 版本不变但补丁集变化时，用它触发重装）
+        buildConfigField("String", "RUNTIME_BUILD", "\"0.1.7-rc.1+dshm.2.1.46\"")
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

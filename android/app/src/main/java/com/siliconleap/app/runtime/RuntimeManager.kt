@@ -177,8 +177,11 @@ object RuntimeManager {
 
     /** 自动重启的时间戳（滑动窗口限流，防止配置错误导致无限重启）。 */
     private val autoRestartTimes = ArrayDeque<Long>()
+    private val systemKillTimes = ArrayDeque<Long>()
     private const val AUTO_RESTART_WINDOW_MS = 10 * 60_000L
     private const val AUTO_RESTART_MAX = 3
+    /** 系统 SIGKILL 单独计数：比配置错误宽松，但仍有上限，防止极端情况下无限重启。 */
+    private const val SYSTEM_KILL_RESTART_MAX = 12
 
     /** 下载源列表（可由设置页调整）。 */
     var metaUrl: String = DEFAULT_META_URL
@@ -403,11 +406,13 @@ object RuntimeManager {
             copyRecursively(staged, targetModules)
             File(tmp, "lib/libdshm_flock.so").takeIf { it.isFile }
                 ?.copyTo(File(libDir, "libdshm_flock.so"), overwrite = true)
+            File(tmp, "lib/dshm-runtime-build.txt").takeIf { it.isFile }
+                ?.copyTo(File(libDir, "dshm-runtime-build.txt"), overwrite = true)
             tmp.deleteRecursively()
             AppSettings.setRuntimeInstalled(ctx, true)
             AppSettings.setRuntimeVersion(ctx, BuildConfig.RUNTIME_VERSION)
             _state.update { it.copy(installed = true, runtimeVersion = BuildConfig.RUNTIME_VERSION) }
-            appendLog("> 内置原生运行时安装完成：${BuildConfig.RUNTIME_VERSION}")
+            appendLog("> 内置原生运行时安装完成：${BuildConfig.RUNTIME_VERSION}（${BuildConfig.RUNTIME_BUILD}，旧版已备份为 node_modules.prev）")
             true
         } catch (e: Exception) {
             appendLog("! 内置运行时安装失败: ${e.javaClass.simpleName}: ${e.message}")
@@ -503,7 +508,8 @@ object RuntimeManager {
                 }
                 return@launch
             }
-            val bundledReady = readRuntimeVersion() == BuildConfig.RUNTIME_VERSION
+            val bundledReady = readRuntimeVersion() == BuildConfig.RUNTIME_VERSION &&
+                readRuntimeBuild() == BuildConfig.RUNTIME_BUILD
             if (hasBundledRuntime() && !bundledReady) {
                 _state.update { it.copy(phase = ServerPhase.EXTRACTING, progress = 0f, message = "正在安装内置原生 DSH 运行时…") }
                 if (!installBundledSdk()) {
@@ -1285,7 +1291,7 @@ object RuntimeManager {
 
         // 每次启动服务清空日志，终端日志框只展示本次过程（不做历史累积）。
         clearLog()
-        appendLog("[DSHM] 稳定性补丁 stability-v1（崩溃记录 / 停服不阻塞界面 / 意外退出自动重启）")
+        appendLog("[DSHM] 稳定性补丁 stability-v2（v2.1.46：运行时 11 项固化补丁 / 系统查杀自动恢复 / 进程普查）")
         CrashRecorder.lastExitSummary?.let { appendLog(it) }
 
         // credentials-local 要求凭证文件仅属主可读（mode 600），否则拒绝读取
@@ -1358,7 +1364,17 @@ object RuntimeManager {
                 }
                 autoRestartTimes.size < AUTO_RESTART_MAX
             }
-            val willRestart = phaseBefore == ServerPhase.RUNNING && enabled && allowed
+            // DSHM v2.1.46: exit=137 is a system kill (phantom-process limit / thermal / cleanup), not a
+            // broken profile. It must not exhaust the crash-loop budget meant for config failures, or
+            // one bad afternoon leaves every workspace's sessions dead until the user notices.
+            val systemKill = code == 137
+            val systemAllowed = systemKill && synchronized(systemKillTimes) {
+                while (systemKillTimes.isNotEmpty() && now - systemKillTimes.first() > AUTO_RESTART_WINDOW_MS) {
+                    systemKillTimes.removeFirst()
+                }
+                systemKillTimes.size < SYSTEM_KILL_RESTART_MAX
+            }
+            val willRestart = phaseBefore == ServerPhase.RUNNING && enabled && (if (systemKill) systemAllowed else allowed)
             appendLog("[DSHM] 服务进程意外退出 exit=${code ?: "?"}（之前状态 ${phaseBefore.name}）")
             CrashRecorder.recordServerExit(code, phaseBefore.name, tailLog(120), willRestart)
             if (phaseBefore != ServerPhase.RUNNING || serverProcess !== proc) return@launch
@@ -1377,12 +1393,13 @@ object RuntimeManager {
                 }
                 return@launch
             }
-            synchronized(autoRestartTimes) { autoRestartTimes.addLast(now) }
+            if (systemKill) synchronized(systemKillTimes) { systemKillTimes.addLast(now) }
+            else synchronized(autoRestartTimes) { autoRestartTimes.addLast(now) }
             _state.update {
                 it.copy(phase = ServerPhase.NOT_READY, pid = null, message = "服务意外退出，正在自动重启…")
             }
-            delay(2000)
-            appendLog("[DSHM] 自动重启服务…")
+            delay(if (systemKill) 1000 else 2000)
+            appendLog(if (systemKill) "[DSHM] 服务被系统 SIGKILL（幻影进程上限/温控清理），自动重启…" else "[DSHM] 自动重启服务…")
             bootstrap()
         }
     }
@@ -1569,6 +1586,11 @@ object RuntimeManager {
             "lib/node_modules/@deepseek-ai/dsh/package.json",
         )
         JSONObject(pkg.readText()).optString("version").ifBlank { null }
+    }.getOrNull()
+
+    /** 已安装内置运行时的补丁集构建戳（v2.1.46 起；旧版本没有该文件）。 */
+    private fun readRuntimeBuild(): String? = runCatching {
+        File(TermuxEnv.prefix(appContext), "lib/dshm-runtime-build.txt").readText().trim().ifBlank { null }
     }.getOrNull()
 
     /** 应用期望的运行时版本（编译期内置，与 runtime 构建的 DSH_VERSION 一致）。 */

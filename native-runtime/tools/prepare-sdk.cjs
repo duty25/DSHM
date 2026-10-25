@@ -2,3 +2,4 @@ const fs=require('node:fs');const path=require('node:path');const {apply}=requir
 console.log(JSON.stringify(require('./apply-session.cjs').apply(sdk)));
 console.log(JSON.stringify(require('./apply-builtin.cjs').apply(sdk)));
 console.log(JSON.stringify(require('./apply-fs.cjs').apply(sdk)));
+console.log(JSON.stringify(require('./apply-stability.cjs').apply(sdk)));

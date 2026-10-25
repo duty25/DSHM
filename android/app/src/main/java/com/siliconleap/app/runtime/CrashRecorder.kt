@@ -76,6 +76,7 @@ object CrashRecorder {
                 appendLine("phaseBefore=$phaseBefore")
                 appendLine("autoRestart=$willRestart")
                 appendLine(memorySnapshot())
+                if (exitCode == 137) appendLine(processCensus())
                 appendLine()
                 appendLine("----- 服务日志（最后部分）-----")
                 append(logTail)
@@ -250,6 +251,34 @@ object CrashRecorder {
             " · App Java 堆=${(rt.totalMemory() - rt.freeMemory()) / 1048576}MB/${rt.maxMemory() / 1048576}MB" +
             " · App 原生堆=${Debug.getNativeHeapAllocatedSize() / 1048576}MB"
     }.getOrDefault("mem: ?")
+
+    /**
+     * DSHM: SIGKILL (exit=137) with lowMemory=false is almost always Android 12+'s phantom-process
+     * limit (all apps together may keep only 32 child processes) or a vendor thermal/cleanup kill.
+     * Record how many processes this app UID owned and the phantom monitor flag so the next
+     * report proves which one it was instead of guessing.
+     */
+    private fun processCensus(): String = runCatching {
+        val uid = Process.myUid().toString()
+        val names = HashMap<String, Int>()
+        var total = 0
+        File("/proc").listFiles()?.forEach { dir ->
+            if (!dir.name.all(Char::isDigit)) return@forEach
+            val status = runCatching { File(dir, "status").readText() }.getOrNull() ?: return@forEach
+            val owner = Regex("""Uid:\s+(\d+)""").find(status)?.groupValues?.get(1)
+            if (owner != uid) return@forEach
+            total++
+            val name = Regex("""Name:\s+(\S+)""").find(status)?.groupValues?.get(1) ?: "?"
+            names[name] = (names[name] ?: 0) + 1
+        }
+        val phantom = runCatching {
+            val c = Class.forName("android.os.SystemProperties")
+            c.getMethod("get", String::class.java, String::class.java)
+                .invoke(null, "persist.sys.fflag.override.settings_enable_monitor_phantom_procs", "") as String
+        }.getOrDefault("?")
+        val top = names.entries.sortedByDescending { it.value }.take(8).joinToString(", ") { "${it.key}=${it.value}" }
+        "procs: appUidProcesses=$total phantomMonitorOverride=${phantom.ifBlank { "unset(默认开启)" }} · $top"
+    }.getOrDefault("procs: ?")
 
     private fun appVersion(): String = com.siliconleap.app.BuildConfig.VERSION_NAME
 

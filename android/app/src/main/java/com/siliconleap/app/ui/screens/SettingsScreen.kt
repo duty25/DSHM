@@ -410,6 +410,28 @@ private fun BackgroundGuardCard() {
                 }
             },
         )
+        val phantomOn = remember { BackgroundGuard.phantomMonitorEnabled() }
+        val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+        ArrowPreference(
+            title = "子进程上限（幻影进程）",
+            summary = if (phantomOn) {
+                "系统仍在限制子进程：DSH+Debian+浏览器+Blender 并发时会被整体 SIGKILL，所有会话同时中断。点击复制解除命令并打开开发者选项（电脑 adb 执行一次即可，Android 14+ 也可直接关闭「子进程限制」）"
+            } else {
+                "已解除子进程上限，多任务并发不会再被系统整体查杀"
+            },
+            startAction = {
+                Icon(
+                    imageVector = if (phantomOn) Icons.Rounded.Warning else Icons.Rounded.CheckCircle,
+                    contentDescription = "子进程上限",
+                    modifier = Modifier.padding(end = 6.dp),
+                    tint = if (phantomOn) colorScheme.error else colorScheme.onBackground,
+                )
+            },
+            onClick = {
+                clipboard.setText(androidx.compose.ui.text.AnnotatedString(BackgroundGuard.PHANTOM_ADB_COMMAND))
+                BackgroundGuard.openDeveloperOptions(context)
+            },
+        )
         ArrowPreference(
             title = "应用详情（电池/自启动）",
             summary = "打开系统应用详情，可设置电池无限制、自启动、锁定后台",

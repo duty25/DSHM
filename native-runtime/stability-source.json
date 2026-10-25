@@ -1,0 +1,49 @@
+{
+  "dsh": "0.1.7-rc.1",
+  "files": {
+    "@deepseek-ai/dsh-app-boot/lib/index.js": {
+      "upstream": "0ab71e0d3b9ef74e994324a3af5e526ce8a58fdd04f89cfe0842da686e3c506a",
+      "patched": "dab3f4936475c412a8a3308e67f5af80e906cc7634132127237c189f83e319e5"
+    },
+    "@deepseek-ai/dsh-plugin-manager/lib/index.js": {
+      "upstream": "05137be84fc8c6d3f31f3e01a80ab0b516c74661603ece4459fb547459bb38dc",
+      "patched": "15500d74edb37389ba5bff2867afe44bbcc31fa1b2febbdec54a511f0165576c"
+    },
+    "@deepseek-ai/dsh-atomic-write/lib/index.js": {
+      "upstream": "eafd9dd0129d925a674530d1d4a22454914ed90449efd1710ee93e5cf4a36a91",
+      "patched": "92e32e65623b9ee72fb6597336637d5edbf75cbda7e331dd6a3588f2a339617e"
+    },
+    "@deepseek-ai/dsh-session/lib/index.js": {
+      "upstream": "718e8d51d731e6f61d3fe605c2a1d2fd71a566d2b96c84e0529b26feb2ac9200",
+      "patched": "990b29fa6625cb5d367e4efae85745b4b9d126252bf14fde2627999e89e98a0a"
+    },
+    "@deepseek-ai/dsh-session-format-v3-to-v4/lib/index.js": {
+      "upstream": "382a3f28b95e0b9504969ac6f407f909aef0ba4699c3175d36c0ef91b31cfde2",
+      "patched": "ce2d46f9ed23f98823e8bb5d46274a24ad73e771bc90ca1d889b2162d2576ad2"
+    },
+    "@deepseek-ai/dsh-config-editor/lib/index.js": {
+      "upstream": "bb85243d9f5729a7186cace56c4ce31d4918bd026482797ef5b7c01bf612fab5",
+      "patched": "0908ebf6ee8463fd972963608f26d479470cd68923ec2e212ff7960821171072"
+    },
+    "@deepseek-ai/dsh-ptc-runtime-node/lib/index.js": {
+      "upstream": "36456a5dc5bfffdb41b11c664dc3a0fcb32ff35def19b247d33f435a1b931efc",
+      "patched": "4ab42cbe86cc26c7068fa30539b304d9cf6e420224932643af7594ee36ea87f8"
+    },
+    "@deepseek-ai/dsh-attachment-local/lib/index.js": {
+      "upstream": "cd39685581b4573a453c6126f8ce73da0bf1257c378827ebb431d6d4064f7662",
+      "patched": "8285dd942ba153d5513008c460c5cd426ac2bf1f092ff878368c52fdfbca8631"
+    },
+    "sharp/dist/sharp.cjs": {
+      "upstream": "76120d3971051fcc469c0bfa36e7b23d3c388b6a2f5785bf1491bbdb90ff0176",
+      "patched": "3b6bf6351f087cc0d588a204b021cd5a795d24c53167eaa2c06ebe075049b962"
+    },
+    "@deepseek-ai/dsh-api-session-controller/lib/index.js": {
+      "upstream": "05daaaf854eabc9db0e1171a55d54fa2f631ca63fe6a91feb0d9c60d827ad79e",
+      "patched": "0855edeac467f2d7fe8d577dd6cfa914729f2b1a07612d2dff8a43c62db4840f"
+    },
+    "@deepseek-ai/dsh-client-ui-conversation/lib/client.js": {
+      "upstream": "061361201411571482747f3b27a065b316018dd207ab8392580d025524ad0ca9",
+      "patched": "fa6ddcfbbb9c9d6f1829d63adc122185cc95cd407c45a2a1dd1c1ce5a1ae0d39"
+    }
+  }
+}

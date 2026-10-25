@@ -35,5 +35,9 @@ with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         z.write(p, 'lib/node_modules/' + rel.as_posix())
         count += 1
     z.write(flock, 'lib/libdshm_flock.so')
+    # DSHM: build stamp lets the App reinstall a re-patched SDK even when the DSH version is unchanged.
+    stamp = sys.argv[4] if len(sys.argv) > 4 else ''
+    if stamp:
+        z.writestr('lib/dshm-runtime-build.txt', stamp + '\n')
 
 print(f'packed {count} sdk files ({skipped} symlinks/shims skipped), {out.stat().st_size} bytes')

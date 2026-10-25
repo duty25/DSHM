@@ -1,8 +1,9 @@
-name: DSHM Native 0.1.7 Same-App APK
+name: DSHM Native 0.1.7 Same-App APK (v2.1.46 stable)
 'on':
   push:
     branches:
     - feat/android-native-dsh017
+    - stable/v2.1.46
   workflow_dispatch: {}
 permissions:
   contents: read
@@ -70,10 +71,11 @@ jobs:
         set -euo pipefail
         npm ci --prefix native-runtime/sdk --ignore-scripts --omit=dev --omit=optional --no-audit --no-fund
         node native-runtime/tools/prepare-sdk.cjs
+        node native-runtime/test/stability-contract.mjs native-runtime/sdk
     - name: Compile arm64 native flock binding
       run: bash native-runtime/tools/build-flock.sh build/android-arm64 android arm64
     - name: Pack bundled native runtime asset
-      run: python3 native-runtime/tools/pack-android-runtime.py native-runtime/sdk build/android-arm64/libdshm_flock.so android/app/src/main/assets/runtime/dsh-native017.zip
+      run: python3 native-runtime/tools/pack-android-runtime.py native-runtime/sdk build/android-arm64/libdshm_flock.so android/app/src/main/assets/runtime/dsh-native017.zip 0.1.7-rc.1+dshm.2.1.46
     - name: Download pinned existing APK; keep its native libraries
       run: |
         set -euo pipefail
@@ -106,12 +108,12 @@ jobs:
       run: |
         set -euo pipefail
         mkdir -p delivery
-        cp android/app/build/outputs/apk/release/app-release.apk delivery/dshm-v2.1.45-native017.apk
-        python3 upgrade/verify_apk.py verify --base "$RUNNER_TEMP/dshm-base.apk" --apk delivery/dshm-v2.1.45-native017.apk --report delivery/upgrade-verification.json
-        sha256sum delivery/dshm-v2.1.45-native017.apk > delivery/dshm-v2.1.45-native017.apk.sha256
+        cp android/app/build/outputs/apk/release/app-release.apk delivery/dshm-v2.1.46-native017.apk
+        python3 upgrade/verify_apk.py verify --base "$RUNNER_TEMP/dshm-base.apk" --apk delivery/dshm-v2.1.46-native017.apk --report delivery/upgrade-verification.json
+        sha256sum delivery/dshm-v2.1.46-native017.apk > delivery/dshm-v2.1.46-native017.apk.sha256
     - uses: actions/upload-artifact@v4
       with:
-        name: dshm-native017-v2.1.45
+        name: dshm-native017-v2.1.46
         path: |-
           delivery/*.apk
           delivery/*.sha256

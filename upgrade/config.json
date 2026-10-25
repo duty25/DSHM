@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "package": "com.siliconleap.app",
-  "versionName": "v2.1.45",
-  "versionCode": 2014500,
+  "versionName": "v2.1.46",
+  "versionCode": 2014600,
   "nativeRuntimeVersion": "0.1.7-rc.1",
   "baseApk": {
     "url": "https://github.com/duty25/DSHM/releases/download/v2.1.1/app-release.apk",

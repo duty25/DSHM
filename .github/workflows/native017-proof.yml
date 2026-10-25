@@ -1,7 +1,7 @@
 name: DSHM Android Native 0.1.7 Proof
 on:
   push:
-    branches: [feat/android-native-dsh017]
+    branches: [feat/android-native-dsh017, stable/v2.1.46]
   workflow_dispatch:
 permissions:
   contents: read
@@ -52,6 +52,7 @@ jobs:
           set -euo pipefail
           npm ci --prefix native-runtime/sdk --ignore-scripts --omit=dev --omit=optional --no-audit --no-fund 2>&1 | tee build/sdk-install.log
           node native-runtime/tools/prepare-sdk.cjs | tee build/sdk-patch.log
+          node native-runtime/test/stability-contract.mjs native-runtime/sdk | tee build/stability-contract.json
       - name: Pinned Android test Node, never an apt install
         run: |
           set -euo pipefail
